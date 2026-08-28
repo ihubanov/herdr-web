@@ -1,0 +1,22 @@
+{
+  "name": "herdr-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local web UI for the herdr agent runtime, over its socket API",
+  "scripts": {
+    "dev": "bun --watch src/server/bridge.ts",
+    "start": "bun src/server/bridge.ts",
+    "typecheck": "tsc --noEmit",
+    "sync-vendor": "cp node_modules/@xterm/xterm/lib/xterm.js src/web/xterm.js && cp node_modules/@xterm/xterm/css/xterm.css src/web/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.js src/web/xterm-addon-fit.js",
+    "gen-tokens": "bun gen-tokens.ts"
+  },
+  "dependencies": {
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "typescript": "^5.7.0"
+  }
+}
