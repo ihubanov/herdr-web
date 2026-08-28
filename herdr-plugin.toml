@@ -1,0 +1,33 @@
+id = "herdr-web"
+name = "herdr web"
+version = "0.1.0"
+min_herdr_version = "0.8.0"
+description = "Browser client for herdr: fleet view, blocked-agent triage, shared terminals"
+platforms = ["linux", "macos"]
+
+# Bun is required at runtime as well; herdr reports build failures but does not
+# install toolchains.
+[[build]]
+command = ["bun", "install", "--frozen-lockfile"]
+
+# The bridge is a long-lived server, so it lives in a pane rather than a startup
+# hook: herdr supervises pane processes, shows their output, and restores the
+# pane with the session. Startup hooks are documented as one-shot init, not
+# daemons, and a hook that forked a server would leave it unsupervised.
+[[panes]]
+id = "server"
+title = "herdr web server"
+placement = "tab"
+command = ["bun", "run", "plugin/serve.ts"]
+
+[[actions]]
+id = "url"
+title = "Show herdr web URL"
+contexts = ["workspace"]
+command = ["bun", "run", "plugin/url.ts"]
+
+[[actions]]
+id = "rotate-tokens"
+title = "Rotate herdr web tokens"
+contexts = ["workspace"]
+command = ["bun", "run", "plugin/rotate.ts"]

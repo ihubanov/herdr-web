@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>herdr</title>
+<link rel="stylesheet" href="/xterm.css" />
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#11151c; --card:#151a23; --line:#242c38; --termbg:#0d1117;
+    --fg:#e6edf3; --dim:#8b98a9; --faint:#5b6675;
+    --blocked:#f0883e; --working:#3fb950; --idle:#58a6ff; --unknown:#6e7681;
+    --blocked-bg:#2a1a0e;
+    /* Percentage of viewport, like the rest of the layout. Clamped in JS to
+       stay usable on very narrow and very wide screens. Drag the divider. */
+    --sidebar:18%;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--fg);overflow:hidden;
+    font:13.5px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:grid;grid-template-columns:var(--sidebar) 5px 1fr;grid-template-rows:44px 1fr;
+    grid-template-areas:"head head head" "side div main";
+    transition:grid-template-columns .16s ease}
+  body.collapsed{--sidebar:0px}
+  body.dragging{transition:none;cursor:col-resize;user-select:none}
+  body.dragging #term{pointer-events:none}
+
+  /* ---------- divider ---------- */
+  #divider{grid-area:div;background:var(--line);cursor:col-resize;position:relative}
+  #divider::after{content:"";position:absolute;inset:0 -4px;}
+  #divider:hover,body.dragging #divider{background:var(--idle)}
+  body.collapsed #divider{display:none}
+
+  /* ---------- header ---------- */
+  header{grid-area:head;display:flex;align-items:center;gap:10px;padding:0 12px;
+    border-bottom:1px solid var(--line);background:var(--panel);min-width:0}
+  .icon{background:transparent;border:1px solid transparent;color:var(--dim);
+    border-radius:6px;padding:4px 8px;font:inherit;cursor:pointer;line-height:1;flex:none}
+  .icon:hover{background:var(--card);border-color:var(--line);color:var(--fg)}
+  .icon.on{background:#1d2531;border-color:#3d4a5c;color:var(--fg)}
+  .brand{font-weight:700;letter-spacing:-.01em;flex:none}
+  .brand span{color:var(--faint);font-weight:400}
+  #crumb{color:var(--dim);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;flex:1;min-width:0}
+  #crumb b{color:var(--fg);font-weight:600}
+  #blockedbadge{background:var(--blocked);color:#1a1005;font-weight:700;font-size:11px;
+    border-radius:999px;padding:2px 9px;cursor:pointer;display:none;flex:none}
+  #blockedbadge.on{display:inline-block}
+  #me{font-size:11.5px;color:var(--idle);background:#16202e;border:1px solid #2b3a4f;
+    border-radius:999px;padding:2px 10px;flex:none;font-weight:600}
+  #me:empty{display:none}
+  #conn{font-size:11.5px;color:var(--faint);flex:none}
+  #conn.live::before,#conn.down::before{content:"";display:inline-block;width:7px;height:7px;
+    border-radius:50%;margin-right:5px;vertical-align:middle}
+  #conn.live::before{background:var(--working)} #conn.down::before{background:var(--blocked)}
+
+  /* ---------- sidebar ---------- */
+  aside{grid-area:side;background:var(--panel);border-right:1px solid var(--line);
+    overflow:hidden auto;min-width:0}
+  body.collapsed aside{border-right:0}
+  .sb-tools{padding:8px 9px;border-bottom:1px solid var(--line);display:flex;gap:6px}
+  #search{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);color:var(--fg);
+    border-radius:6px;padding:5px 9px;font:inherit;font-size:12.5px}
+  #search::placeholder{color:var(--faint)}
+  .space{border-bottom:1px solid #1b212b}
+  .space-head{display:flex;align-items:center;gap:7px;padding:7px 10px;cursor:pointer;
+    font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--faint);font-weight:700}
+  .space-head:hover{background:#161b24;color:var(--dim)}
+  .caret{transition:transform .12s;font-size:9px;opacity:.8}
+  .space.closed .caret{transform:rotate(-90deg)}
+  .space-head .n{margin-left:auto;font-weight:600;letter-spacing:0}
+  .sb-add{flex:none;font-size:12px;padding:4px 7px}
+  .act{opacity:0;background:transparent;border:0;color:var(--faint);cursor:pointer;
+    font:inherit;font-size:11px;padding:0 3px;border-radius:4px;flex:none}
+  .space-head:hover .act,.item:hover .act{opacity:1}
+  .act:hover{color:var(--fg);background:#232c3a}
+  .act.danger:hover{color:var(--blocked)}
+
+  /* ---------- modal ---------- */
+  #modal{position:fixed;inset:0;display:none;place-items:center;background:#000c;z-index:50}
+  #modal.on{display:grid}
+  #modal .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;min-width:420px;max-width:90vw}
+  #modal h3{margin:0 0 4px;font-size:14px}
+  #modal .sub{color:var(--faint);font-size:12px;margin-bottom:14px}
+  #modal label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.06em;
+    color:var(--faint);margin:10px 0 4px;font-weight:600}
+  #modal input{width:100%;background:var(--card);border:1px solid var(--line);color:var(--fg);
+    border-radius:7px;padding:7px 10px;font:inherit;font-size:13px}
+  #modal input:focus{outline:none;border-color:var(--idle)}
+  #modal .row{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+  #modal button{border-radius:7px;padding:6px 14px;font:inherit;font-size:12.5px;cursor:pointer;
+    border:1px solid var(--line);background:var(--card);color:var(--fg)}
+  #modal button.go{background:var(--idle);border:0;color:#06121f;font-weight:700}
+  #modal button.go.danger{background:var(--blocked);color:#1a1005}
+  #modal .err{color:#f87171;font-size:12px;margin-top:10px;min-height:14px}
+  .space.closed .space-body{display:none}
+  .space-body{padding:2px 6px 7px}
+  .item{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:6px;
+    cursor:pointer;border:1px solid transparent}
+  .item:hover{background:#171d27}
+  .item.sel{background:#1b2432;border-color:#3d4a5c}
+  .item.cursor{border-color:var(--idle)}
+  .item.blocked{background:var(--blocked-bg)}
+  .item.blocked:hover{background:#33200f}
+  .dot{width:7px;height:7px;border-radius:50%;flex:none}
+  .dot.blocked{background:var(--blocked);box-shadow:0 0 0 3px #f0883e26}
+  .dot.working{background:var(--working)} .dot.idle{background:var(--idle)}
+  .dot.unknown{background:var(--unknown)}
+  .item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:12.5px}
+  .item .t{font-size:10.5px;color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+  .item.blocked .t{color:var(--blocked);font-weight:700}
+  .sb-empty{color:var(--faint);padding:16px;text-align:center;font-size:12px}
+
+  /* ---------- main ---------- */
+  main{grid-area:main;position:relative;min-width:0;min-height:0;display:flex;
+    flex-direction:column;background:var(--termbg)}
+  #ctl{display:none;align-items:center;gap:9px;padding:6px 11px;background:var(--panel);
+    border-bottom:1px solid var(--line);flex:none}
+  #ctl.on{display:flex}
+  #ctlmeta{font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;flex:1;min-width:0}
+  #ctl button{background:var(--card);color:var(--fg);border:1px solid var(--line);
+    border-radius:6px;padding:3px 10px;font:inherit;font-size:11.5px;cursor:pointer;flex:none}
+  #ctl button:hover:not(:disabled){border-color:var(--blocked);color:var(--blocked)}
+  #ctl button:disabled{opacity:.45;cursor:default}
+  #tstatus{font-size:11.5px;color:var(--faint);flex:none}
+
+  /* question context shown above the composer when a pane is blocked.
+     Sized generously and resizable: a blocked agent's question is often the
+     whole reason you are here, and a 4-line peephole made it unreadable. */
+  #askctx{display:none;background:#12161d;border-bottom:1px solid #5c3a1c;
+    padding:9px 13px;max-height:46vh;overflow:auto;resize:vertical;flex:none}
+  #askctx.on{display:block}
+  #askctx .q{font:12/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#e8c9a6;
+    white-space:pre-wrap;word-break:break-word;margin:0}
+  #presetrow{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+  .preset{background:#241a10;border:1px solid #5c3a1c;color:#f0c48e;border-radius:5px;
+    padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
+  .preset:hover{background:#33240f;border-color:var(--blocked);color:var(--blocked)}
+
+  #term{flex:1;min-height:0;padding:4px 6px}
+  /* "typing as" lives in the control bar, which already exists — anything in
+     or beside the terminal costs columns, and the terminal is the product. */
+  #whoami{display:none;flex:none;font:600 11px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace;
+    background:#132a1c;border:1px solid #2c5c3a;color:var(--working);
+    border-radius:999px;padding:2px 9px;white-space:nowrap}
+  #whoami.on{display:inline-block}
+  #term.hidden{display:none}
+
+  /* thin status strip under the terminal: who else is here + queue state */
+  #statusbar{display:none;gap:12px;align-items:center;padding:4px 11px;background:var(--panel);
+    border-top:1px solid var(--line);flex:none;font-size:11px;color:var(--faint)}
+  #statusbar.on{display:flex}
+  #roster{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .who{background:#16202e;border:1px solid #2b3a4f;border-radius:999px;padding:1px 9px;
+    color:var(--idle);font-weight:600}
+  .who.me{background:#132a1c;border-color:#2c5c3a;color:var(--working)}
+  .who.agent{background:#2a1f10;border-color:#5c4a1c;color:var(--blocked)}
+  .who.agent .ai{opacity:.75;font-weight:700;margin-left:3px;font-size:9.5px;
+    letter-spacing:.04em;vertical-align:baseline}
+  #chatq .q{color:var(--blocked)}
+  #chatq .f{color:#f87171}
+
+  /* ---------- structured chat view ---------- */
+  #chatview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
+  #chatview.on{display:flex}
+  #msgs{flex:1;min-height:0;overflow-y:auto;padding:14px 16px;display:flex;
+    flex-direction:column;gap:12px}
+  .msg{display:flex;gap:10px;align-items:flex-start;max-width:1000px}
+  .msg .av{flex:none;border-radius:999px;padding:2px 9px;font:600 11px/1.5 ui-monospace,monospace;
+    white-space:nowrap;margin-top:1px}
+  .msg.user .av{background:#16202e;border:1px solid #2b3a4f;color:var(--idle)}
+  .msg.user.me .av{background:#132a1c;border:1px solid #2c5c3a;color:var(--working)}
+  .msg.agent .av{background:#2a1f10;border:1px solid #5c4a1c;color:var(--blocked)}
+  .msg .body{min-width:0;flex:1}
+  .msg .txt{white-space:pre-wrap;word-break:break-word;font-size:13.5px;line-height:1.55}
+  .msg.user .txt{color:var(--fg)}
+  .msg.agent .txt{color:#dbe4ee}
+  .think{font-style:italic;color:var(--faint);font-size:12.5px;
+    border-left:2px solid var(--line);padding-left:9px;white-space:pre-wrap}
+  .tool{background:#0d1117;border:1px solid var(--line);border-radius:7px;padding:7px 10px;
+    font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#9fb4cc;
+    white-space:pre-wrap;word-break:break-word;overflow-x:auto}
+  .tool .name{color:var(--blocked);font-weight:700}
+  .tool.result{color:var(--dim);max-height:220px;overflow:auto}
+  .sys{color:var(--faint);font-size:11.5px;font-style:italic}
+  #composer{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);
+    background:var(--panel);flex:none}
+  #cin{flex:1;background:var(--card);border:1px solid var(--line);color:var(--fg);
+    border-radius:8px;padding:9px 12px;font:inherit;font-size:13.5px}
+  #cin:focus{outline:none;border-color:var(--idle)}
+  #cgo{background:var(--idle);border:0;color:#06121f;font-weight:700;border-radius:8px;
+    padding:9px 18px;font:inherit;font-size:13px;cursor:pointer}
+  #cgo:disabled{opacity:.5;cursor:default}
+  .hitl{border:1px solid #5c3a1c;background:var(--blocked-bg);border-radius:9px;padding:11px 13px}
+  .hitl h4{margin:0 0 7px;font-size:12.5px;color:var(--blocked)}
+  .hitl .opts{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+  .hitl.done{opacity:.55;border-color:var(--line);background:transparent}
+  .hitl .verdict{font-size:11.5px;color:var(--faint);margin-top:7px}
+
+  /* ---------- fleet overlay view ---------- */
+  #fleet{position:absolute;inset:0;background:var(--bg);overflow-y:auto;padding:14px;display:none}
+  #fleet.on{display:block}
+  .section-label{font-size:11px;text-transform:uppercase;letter-spacing:.09em;
+    color:var(--faint);margin:4px 0 9px;font-weight:600}
+  .grid{display:grid;gap:9px;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));
+    margin-bottom:22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:11px 12px;
+    cursor:pointer;position:relative;overflow:hidden}
+  .card:hover{border-color:#3d4a5c}
+  .card.cursor{outline:2px solid var(--idle);outline-offset:1px}
+  .card.blocked{background:var(--blocked-bg);border-color:#5c3a1c}
+  .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--unknown)}
+  .card.blocked::before{background:var(--blocked)}
+  .card.working::before{background:var(--working)}
+  .card.idle::before{background:var(--idle)}
+  .row1{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+  .title{font-weight:600;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;
+    white-space:nowrap;flex:1}
+  .badge{font-size:10px;padding:2px 6px;border-radius:4px;background:#1e2734;color:var(--dim);
+    font-weight:600;flex:none}
+  .time{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;flex:none}
+  .card.blocked .time{color:var(--blocked);font-weight:600}
+  .task{font-size:11.5px;color:var(--dim);margin:-1px 0 5px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;opacity:.85}
+  .row2{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--dim);overflow:hidden}
+  .repo{color:var(--fg);opacity:.75}
+  .branch{color:var(--faint)} .branch::before{content:"⎇ ";opacity:.7}
+  .path{color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    direction:rtl;text-align:left;flex:1;min-width:0}
+  .preview{margin-top:8px;background:#0c0f15;border:1px solid #2d2013;border-radius:6px;
+    padding:7px 9px;font:11/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;color:#c9d3de;
+    max-height:130px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+  .presets{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+  .empty,.triage-empty{color:var(--faint);padding:40px;text-align:center}
+  .triage-empty b{color:var(--working);display:block;font-size:19px;margin-bottom:7px}
+  body.triage .card:not(.blocked),body.triage .section-label:not(.b){display:none}
+  body.triage .grid{grid-template-columns:1fr;max-width:860px}
+
+  /* ---------- help ---------- */
+  #helpbox{position:fixed;inset:0;display:none;place-items:center;background:#000b;z-index:40}
+  #helpbox.on{display:grid}
+  #helpbox .inner{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+    padding:20px 24px;min-width:350px}
+  #helpbox h3{margin:0 0 12px;font-size:14px}
+  #helpbox dl{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:0;font-size:12.5px}
+  #helpbox dt{color:var(--blocked);font-family:ui-monospace,monospace;font-weight:600}
+  #helpbox dd{margin:0;color:var(--dim)}
+</style>
+</head>
+<body>
+  <header>
+    <button class="icon" id="toggleside" title="Toggle sidebar (b)">☰</button>
+    <div class="brand">herdr</div>
+    <div id="crumb">no pane selected</div>
+    <span id="blockedbadge">0 blocked</span>
+    <button class="icon" id="fleetbtn" title="Fleet view (g)">▦</button>
+    <button class="icon" id="triage" title="Triage — blocked only (t)">⚡</button>
+    <button class="icon" id="sound" title="Sound on blocked (s)">🔔</button>
+    <button class="icon" id="help" title="Shortcuts (?)">?</button>
+    <span id="me" title="signed in as"></span>
+    <div id="conn" class="down">connecting</div>
+  </header>
+
+  <aside>
+    <div class="sb-tools">
+      <input id="search" placeholder="filter…" />
+      <button class="icon sb-add" id="newspace" title="New space">+▣</button>
+    </div>
+    <div id="tree"><div class="sb-empty">loading…</div></div>
+  </aside>
+
+  <div id="divider" title="Drag to resize · double-click to reset"></div>
+
+  <main>
+    <div id="ctl">
+      <span id="ctlmeta"></span>
+      <span id="whoami"></span>
+      <span id="tstatus">—</span>
+      <button id="takeover">take control</button>
+      <button id="chatbtn" style="display:none">chat view</button>
+      <button id="detach">detach</button>
+    </div>
+    <div id="askctx"><div class="q" id="askq"></div><div id="presetrow"></div></div>
+    <div id="term"></div>
+    <div id="chatview">
+      <div id="msgs"></div>
+      <div id="composer">
+        <input id="cin" placeholder="message…" />
+        <button id="cgo">send</button>
+      </div>
+    </div>
+    <div id="statusbar"><span id="roster"></span><span id="chatq"></span></div>
+    <div id="fleet"></div>
+  </main>
+
+  <div id="modal"><div class="box">
+    <h3 id="mtitle">…</h3>
+    <div class="sub" id="msub"></div>
+    <div id="mfields"></div>
+    <div class="err" id="merr"></div>
+    <div class="row">
+      <button id="mcancel">cancel</button>
+      <button class="go" id="mok">create</button>
+    </div>
+  </div></div>
+
+  <div id="helpbox"><div class="inner">
+    <h3>Shortcuts</h3>
+    <dl>
+      <dt>b</dt><dd>toggle sidebar</dd>
+      <dt>g</dt><dd>fleet view ⇄ terminal</dd>
+      <dt>t</dt><dd>triage (blocked only)</dd>
+      <dt>j / k</dt><dd>move through agents</dd>
+      <dt>↵</dt><dd>open the selected agent</dd>
+      <dt>n</dt><dd>new session in the current space</dd>
+      <dt>N</dt><dd>new space</dd>
+      <dt>m</dt><dd>message this agent (group chat)</dd>
+      <dt>r</dt><dd>reply to a blocked agent</dd>
+      <dt>1…4</dt><dd>send preset reply</dd>
+      <dt>/</dt><dd>focus filter</dd>
+      <dt>s</dt><dd>toggle blocked sound</dd>
+      <dt>?</dt><dd>this help</dd>
+      <dt>esc</dt><dd>leave terminal focus / dismiss</dd>
+    </dl>
+  </div></div>
+
+  <script src="/xterm.js"></script>
+  <script src="/xterm-addon-fit.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
