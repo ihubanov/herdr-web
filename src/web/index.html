@@ -164,6 +164,22 @@
   #chatq .q{color:var(--blocked)}
   #chatq .f{color:#f87171}
 
+  /* ---------- embedded view ---------- */
+  #frameview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
+  #frameview.on{display:flex}
+  /* The bar is not decoration: agent-controlled content is on screen, so the
+     surrounding chrome has to say whose it is and where it came from. */
+  #framebar{display:flex;align-items:center;gap:10px;padding:5px 11px;flex:none;
+    background:#2a1f10;border-bottom:1px solid #5c4a1c;font-size:11.5px;color:#e8c9a6}
+  #framebar .lbl{font-weight:700;text-transform:uppercase;letter-spacing:.07em;font-size:10px}
+  #frameurl{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0;opacity:.9}
+  #framewho{flex:none;opacity:.75}
+  #framebar button{background:transparent;border:1px solid #5c4a1c;color:#e8c9a6;
+    border-radius:5px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer;flex:none}
+  #framebar button:hover{border-color:var(--blocked);color:var(--blocked)}
+  #frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
+
   /* ---------- structured chat view ---------- */
   #chatview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
   #chatview.on{display:flex}
@@ -282,10 +298,22 @@
       <span id="tstatus">—</span>
       <button id="takeover">take control</button>
       <button id="chatbtn" style="display:none">chat view</button>
+      <button id="framebtn" style="display:none">view</button>
       <button id="detach">detach</button>
     </div>
     <div id="askctx"><div class="q" id="askq"></div><div id="presetrow"></div></div>
     <div id="term"></div>
+    <div id="frameview">
+      <div id="framebar">
+        <span class="lbl">embedded view</span>
+        <span id="frameurl"></span>
+        <span id="framewho"></span>
+        <button id="frameopen">open in a tab</button>
+      </div>
+      <iframe id="frame" sandbox="allow-scripts allow-same-origin allow-forms"
+              referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
+    </div>
+
     <div id="chatview">
       <div id="msgs"></div>
       <div id="composer">
