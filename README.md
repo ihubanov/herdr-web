@@ -158,6 +158,42 @@ bun tools/handshake.ts --sock <path>   # direct, skips discovery
 
 `tools/mock-agent.ts` is the reference implementation it is validated against.
 
+## Embedded views (off by default)
+
+An agent can advertise a URL as an `iframe_url` pane token — the same discovery
+path as the agent stream — and herdr-web will show it as a view.
+
+```bash
+HERDR_WEB_IFRAMES=off | loopback | on      # default: off
+```
+
+**Off by default on purpose.** An iframe puts agent-controlled content inside the
+page holding your token, so a prompt-injected agent could render a convincing
+fake prompt inside a UI you trust. This is a switch on an attack surface, not a
+preference. `loopback` accepts only 127.0.0.1/localhost, and every policy refuses
+herdr-web's own origin — framing ourselves would let the frame drop its sandbox
+and read the token.
+
+### Shared browser
+
+`tools/shared-browser.sh` is the case this exists for: it brings up Xvfb +
+x11vnc + websockify + noVNC and advertises the URL.
+
+```bash
+tools/shared-browser.sh --display 99 --port 6099
+tools/shared-browser.sh --stop --display 99
+```
+
+You drive it through noVNC; the agent drives the **same X display** through
+Appium/WebDriver. The shared surface is the display, not the iframe — which is
+why both sides genuinely see and act on one GUI, something a plain iframe cannot
+give you (the agent has no eyes in your browser).
+
+Both listeners bind loopback only. Two traps worth knowing: x11vnc exits with
+"Wayland display server detected" unless `WAYLAND_DISPLAY` is cleared, even when
+the target is a plain X11 Xvfb; and both x11vnc and websockify bind every
+interface unless told otherwise, which would put a live desktop on the network.
+
 ## Chat view
 
 For agents that implement [`herdr-agent-stream/1`](docs/PROTOCOL.md), a **chat

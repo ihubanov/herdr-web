@@ -16,6 +16,8 @@ const el = {
   statusbar: $("statusbar"), whoami: $("whoami"),
   chatview: $("chatview"), msgs: $("msgs"), cin: $("cin"), cgo: $("cgo"),
   chatbtn: $("chatbtn"),
+  frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
+  frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
   divider: $("divider"), toggleside: $("toggleside"), fleetbtn: $("fleetbtn"), triage: $("triage"),
   newspace: $("newspace"), modal: $("modal"), mtitle: $("mtitle"), msub: $("msub"),
   mfields: $("mfields"), merr: $("merr"), mok: $("mok"), mcancel: $("mcancel"),
@@ -178,6 +180,7 @@ function entry(id) { return fleet.find((f) => f.pane_id === id) || null; }
 function attach(f, mode = "observe") {
   if (!f) return;
   closeChat();
+  closeFrame();
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = f.pane_id;
   activeMode = mode;
@@ -199,6 +202,15 @@ function attach(f, mode = "observe") {
       el.chatbtn.title = c?.stream
         ? "Message-level chat with per-message attribution"
         : "";
+
+      el.framebtn.style.display = c?.iframe ? "inline-block" : "none";
+      el.framebtn.title = c?.iframe ? `Embedded view: ${c.iframe.url}` : "";
+      // A rejected advertisement is worth saying out loud: an agent asked to
+      // show something and policy refused, which is otherwise invisible.
+      if (c?.iframeRejected) {
+        console.warn(`herdr-web: iframe refused — ${c.iframeRejected}`);
+        el.tstatus.textContent = `view blocked (${c.iframePolicy})`;
+      }
     })
     .catch(() => {});
   el.tstatus.textContent = "attaching…";
@@ -240,8 +252,10 @@ function attach(f, mode = "observe") {
 
 function detach() {
   closeChat();
+  closeFrame();
   capability = null;
   el.chatbtn.style.display = "none";
+  el.framebtn.style.display = "none";
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = null; activeMode = "observe";
   el.ctl.classList.remove("on");
@@ -264,6 +278,8 @@ function setView(v) {
   el.fleet.classList.toggle("on", v === "fleet");
   el.term.classList.toggle("hidden", v !== "terminal");
   el.chatview.classList.toggle("on", v === "chat");
+  el.frameview.classList.toggle("on", v === "frame");
+  el.framebtn.classList.toggle("on", v === "frame");
   el.fleetbtn.classList.toggle("on", v === "fleet");
   el.chatbtn.classList.toggle("on", v === "chat");
   if (v === "terminal") setTimeout(refit, 40);
@@ -327,6 +343,31 @@ function setSidebar(hidden) {
 }
 el.toggleside.onclick = () => setSidebar(!sidebarHidden);
 el.fleetbtn.onclick = toggleView;
+el.framebtn.onclick = () => {
+  if (view === "frame") { closeFrame(); setView("terminal"); }
+  else if (selected && capability?.iframe) openFrame(capability.iframe.url);
+};
+
+/**
+ * Show an agent-advertised URL. The frame is sandboxed and must be a different
+ * origin than this page — the bridge enforces that, since `allow-same-origin`
+ * on a same-origin frame would let it drop its own sandbox and read our token.
+ */
+function openFrame(url) {
+  el.frame.src = url;
+  el.frameurl.textContent = url;
+  const f = entry(selected);
+  el.framewho.textContent = f ? `from ${f.title}` : "";
+  setView("frame");
+}
+function closeFrame() {
+  el.frame.src = "about:blank";
+  el.frameurl.textContent = "";
+}
+el.frameopen.onclick = () => {
+  if (capability?.iframe) window.open(capability.iframe.url, "_blank", "noopener,noreferrer");
+};
+
 el.chatbtn.onclick = () => {
   if (view === "chat") { closeChat(); setView("terminal"); }
   else if (selected && chatAvailable()) openChat(selected);

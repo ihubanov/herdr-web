@@ -39,6 +39,52 @@ const DEFAULT_LAUNCH_CMD = (process.env.HERDR_WEB_DEFAULT_LAUNCH_CMD || "").trim
  * agent. Naming it makes the conversation legible. Empty means unbranded.
  */
 const AGENT_NAME = (process.env.HERDR_WEB_AGENT_NAME || "").trim();
+
+/**
+ * Embedded iframe views, advertised by an agent as an `iframe_url` pane token.
+ *
+ * OFF BY DEFAULT, deliberately. An iframe puts agent-controlled content inside
+ * the page that holds the viewer's herdr-web token, so a prompt-injected agent
+ * could render a convincing fake prompt inside a UI the user trusts. This is a
+ * switch on an attack surface, not a preference.
+ *
+ *   off       tokens ignored entirely (default)
+ *   loopback  only 127.0.0.1 / localhost — covers the noVNC case, which is the
+ *             one where the agent and the user genuinely share a surface
+ *   on        any http(s) origin
+ */
+type IframePolicy = "off" | "loopback" | "on";
+const IFRAME_POLICY: IframePolicy = (() => {
+  const v = (process.env.HERDR_WEB_IFRAMES || "off").trim().toLowerCase();
+  return v === "on" || v === "loopback" ? v : "off";
+})();
+
+/**
+ * An iframe is only safe to grant `allow-same-origin` when its origin differs
+ * from ours — otherwise the frame can reach into this page and read the token.
+ * Rejecting our own origin is what makes that sandbox choice defensible.
+ */
+export function iframeUrlAllowed(raw: string, policy: IframePolicy, selfPort: number):
+    { ok: true; url: string } | { ok: false; reason: string } {
+  if (policy === "off") return { ok: false, reason: "iframes disabled (HERDR_WEB_IFRAMES=off)" };
+  let u: URL;
+  try { u = new URL(raw); } catch { return { ok: false, reason: "not a valid URL" }; }
+  if (u.protocol !== "http:" && u.protocol !== "https:") {
+    return { ok: false, reason: `scheme ${u.protocol} not allowed` };
+  }
+  const host = u.hostname;
+  const isLoopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  if (policy === "loopback" && !isLoopback) {
+    return { ok: false, reason: "only loopback URLs allowed (HERDR_WEB_IFRAMES=loopback)" };
+  }
+  // Never frame ourselves: same origin would let the frame drop its sandbox and
+  // read this page, token included.
+  const port = u.port || (u.protocol === "https:" ? "443" : "80");
+  if (isLoopback && Number(port) === selfPort) {
+    return { ok: false, reason: "refusing to frame herdr-web's own origin" };
+  }
+  return { ok: true, url: u.toString() };
+}
 const TOKEN = identity.adminToken;
 const WEB_ROOT = new URL("../web/", import.meta.url).pathname;
 
@@ -326,7 +372,25 @@ const server = Bun.serve<WsData>({
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
         const cap = await detectStream(paneId);
-        return Response.json({ pane_id: paneId, stream: !!cap, capability: cap });
+
+        // An agent advertises a view the same way it advertises a stream:
+        // a pane metadata token. Same discovery path, same TTL semantics.
+        let iframe: { url: string } | null = null;
+        let iframeRejected: string | null = null;
+        try {
+          const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+          const raw = String(tokens.iframe_url ?? "").trim();
+          if (raw) {
+            const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
+            if (v.ok) iframe = { url: v.url };
+            else iframeRejected = v.reason;
+          }
+        } catch { /* pane vanished */ }
+
+        return Response.json({
+          pane_id: paneId, stream: !!cap, capability: cap,
+          iframe, iframeRejected, iframePolicy: IFRAME_POLICY,
+        });
       }
 
       if (url.pathname === "/api/presence") {
@@ -587,6 +651,7 @@ console.log(`
   users   ${identity.describe()}
   launch  ${DEFAULT_LAUNCH_CMD || "(none — new sessions open a shell)"}
   agent   ${AGENT_NAME || "(unbranded)"}
+  iframes ${IFRAME_POLICY}${IFRAME_POLICY === "off" ? " (set HERDR_WEB_IFRAMES=loopback to enable)" : ""}
   bound   ${HOST} only (never 0.0.0.0)
 
   Set HERDR_WEB_TOKEN to pin the token, HERDR_WEB_PORT to change the port.
