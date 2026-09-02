@@ -984,6 +984,7 @@ function avatarHTML(author, isAgent, repeat) {
  * stamping every one of them was the main source of noise.
  */
 function msgBlock(author, isAgent, innerHTML) {
+  collapseLive();
   const who = speakerOf(author, isAgent);
   const repeat = who === lastSpeaker;
   lastSpeaker = who;
@@ -996,10 +997,26 @@ function msgBlock(author, isAgent, innerHTML) {
   return d;
 }
 
-/** Long output is clamped; clicking expands it. */
-function clamped(html, cls) {
-  const id = `c${Math.random().toString(36).slice(2, 8)}`;
-  return `<div class="${cls} clamp" data-clamp="${id}">${html}</div>`;
+/**
+ * Transient output — a tool result, a block of reasoning — renders EXPANDED
+ * while it is the newest thing on screen, then collapses as soon as the next
+ * frame arrives. That is how the terminal behaves: you watch it happen, and
+ * afterwards it gets out of the way. Clicking a collapsed block reopens it.
+ *
+ * `live` marks the currently-expanded block; `collapseLive()` retires it.
+ */
+function clamped(html, cls, live = false) {
+  return `<div class="${cls} clamp${live ? " live open" : ""}">${html}</div>`;
+}
+
+function collapseLive() {
+  for (const n of el.msgs.querySelectorAll(".clamp.live")) {
+    n.classList.remove("live");
+    // Only actually collapse blocks tall enough to be worth hiding; a
+    // three-line result flapping shut looks like a glitch.
+    if (n.scrollHeight > 190) n.classList.remove("open");
+    else n.classList.add("open");
+  }
 }
 el.msgs.addEventListener("click", (e) => {
   const c = e.target.closest(".clamp");
@@ -1046,6 +1063,8 @@ function handleFrame(f) {
   if (f.type === "_nostream") { appendSys("this agent does not expose a structured stream"); return; }
   if (f.type === "_closed")   { appendSys(`stream closed: ${f.reason ?? ""}`); return; }
   if (f.type === "participants") return;
+  // A completed turn is "done" even if no further frame follows it.
+  if (f.type === "frame" && f.msg?.type === "result") { collapseLive(); return; }
   if (f.type === "error") { appendSys(`agent refused: ${f.code ?? "error"} ${f.message ?? ""}`); return; }
 
   if (f.type === "permission_request") { renderPermission(f); return; }
@@ -1077,7 +1096,7 @@ function handleFrame(f) {
       const t = esc(c.thinking);
       msgBlock(f.author, true,
         `<div class="line"><span class="glyph spark">✳</span>` +
-        (c.thinking.length > 700 ? clamped(t, "think") : `<div class="think">${t}</div>`) + `</div>`);
+        clamped(t, "think", true) + `</div>`);
     } else if (c.type === "tool_use") {
       msgBlock(f.author, true,
         `<div class="line"><span class="glyph dot">●</span>` +
@@ -1088,8 +1107,7 @@ function handleFrame(f) {
       const t = esc(body.trim());
       msgBlock(f.author, true,
         `<div class="line nested"><span class="glyph hook">⎿</span>` +
-        (body.length > 600 ? clamped(t, `out${err ? " err" : ""}`)
-                           : `<div class="out${err ? " err" : ""}">${t}</div>`) + `</div>`);
+        clamped(t, `out${err ? " err" : ""}`, true) + `</div>`);
     }
   }
 }
