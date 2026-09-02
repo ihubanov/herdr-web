@@ -16,6 +16,7 @@ import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from ".
 import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
+import { findTranscript, followTranscript, type TranscriptHandle } from "./transcript.ts";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.HERDR_WEB_PORT || 7878);
@@ -184,6 +185,8 @@ interface WsData {
   lineHasContent?: boolean;
   /** Structured agent stream, for the chat view. */
   stream?: StreamHandle;
+  /** Transcript follower, for agents with no live protocol socket. */
+  tail?: TranscriptHandle;
 }
 
 const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
@@ -372,6 +375,19 @@ const server = Bun.serve<WsData>({
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
         const cap = await detectStream(paneId);
+        // No live socket? A claude pane still has a transcript on disk, which is
+        // enough to render the conversation read-only. Chat then works for every
+        // claude pane rather than only those wired for the protocol.
+        let transcript: { path: string; session: string } | null = null;
+        if (!cap) {
+          try {
+            const sid = (await call("pane.get", { pane_id: paneId }))?.pane?.agent_session?.value;
+            if (typeof sid === "string" && sid) {
+              const path = await findTranscript(sid);
+              if (path) transcript = { path, session: sid };
+            }
+          } catch { /* pane vanished */ }
+        }
 
         // An agent advertises a view the same way it advertises a stream:
         // a pane metadata token. Same discovery path, same TTL semantics.
@@ -388,7 +404,13 @@ const server = Bun.serve<WsData>({
         } catch { /* pane vanished */ }
 
         return Response.json({
-          pane_id: paneId, stream: !!cap, capability: cap,
+          pane_id: paneId,
+          stream: !!cap || !!transcript,
+          // "live" speaks the protocol both ways; "transcript" is read-only
+          // history the client must not offer to reply into as a protocol say.
+          source: cap ? "live" : (transcript ? "transcript" : null),
+          capability: cap,
+          transcript: transcript ? { session: transcript.session } : null,
           iframe, iframeRejected, iframePolicy: IFRAME_POLICY,
         });
       }
@@ -550,7 +572,22 @@ const server = Bun.serve<WsData>({
         void (async () => {
           const cap = await detectStream(d.paneId!);
           if (!cap) {
-            try { ws.send(JSON.stringify({ type: "_nostream" })); ws.close(1000, "no stream"); } catch {}
+            // Fall back to the on-disk transcript before giving up.
+            let path: string | null = null, sid = "";
+            try {
+              sid = (await call("pane.get", { pane_id: d.paneId! }))?.pane?.agent_session?.value ?? "";
+              if (sid) path = await findTranscript(sid);
+            } catch { /* pane vanished */ }
+            if (!path) {
+              try { ws.send(JSON.stringify({ type: "_nostream" })); ws.close(1000, "no stream"); } catch {}
+              return;
+            }
+            const t = followTranscript(path, { session: sid });
+            d.tail = t;
+            t.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
+            t.onClose((reason) => {
+              try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
+            });
             return;
           }
           const h = openStream(cap, { fromSeq: 0, client: `herdr-web/${d.who}` });
@@ -634,6 +671,7 @@ const server = Bun.serve<WsData>({
       liveSockets.delete(ws);
       eventClients.delete(ws);
       ws.data.stream?.close();
+      ws.data.tail?.close();
       ws.data.unsub?.();
       ws.data.session?.release();
       if ((ws.data.kind === "terminal" || ws.data.kind === "stream") && ws.data.paneId) {
