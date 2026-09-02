@@ -849,11 +849,15 @@ function alertBlocked(next) {
       }
     }
   }
-  // Not every agent emits a `result` frame to close a turn. Pane status is
-  // the backstop so the ticker can never run forever.
+  // Not every agent emits a `result` frame to close a turn, so pane status is
+  // the backstop. It must be a TRANSITION out of working, not merely "not
+  // working": a pane that never reports a real agent status sits at "unknown"
+  // forever, and treating that as an ending chops every turn at the first
+  // fleet poll.
   if (turn && streamPane) {
     const st = next.find((f) => f.pane_id === streamPane)?.agent_status;
-    if (st && st !== "working") turnEnd(null, null);
+    if (st === "working") turn.sawWorking = true;
+    else if (turn.sawWorking && st && st !== "unknown") turnEnd(null, null);
   }
   prev = new Map(next.map((f) => [f.pane_id, f.agent_status]));
 }
@@ -1012,8 +1016,12 @@ function fmtTok(n) {
 function turnStart() {
   if (turn) return;
   const d = document.createElement("div");
-  d.className = "turnstat";
-  turn = { t0: Date.now(), out: 0, word: GERUNDS[(Math.random() * GERUNDS.length) | 0],
+  // Same grid as a message row (blank badge column + body) so the glyph lands
+  // in the same column as every ● above it. A bespoke grid drifts out of
+  // alignment the moment the message layout changes.
+  d.className = "msg agent turnstat";
+  turn = { t0: Date.now(), out: 0, sawWorking: false,
+           word: GERUNDS[(Math.random() * GERUNDS.length) | 0],
            wordAt: Date.now(), el: d, timer: null };
   el.msgs.appendChild(d);
   turnTick();
@@ -1032,9 +1040,11 @@ function turnTick() {
   const bits = [fmtDur(now - turn.t0)];
   if (tok) bits.push(`↓ ${tok} tokens`);
   turn.el.innerHTML =
-    `<span class="glyph spark">✻</span>` +
+    `<div class="av blank"></div><div class="body"><div class="line">` +
+    `<span class="glyph spark">✻</span><div class="tt">` +
     `<span class="tw">${esc(turn.word)}…</span> ` +
-    `<span class="tm">(${esc(bits.join(" · "))})</span>`;
+    `<span class="tm">(${esc(bits.join(" · "))})</span>` +
+    `</div></div></div>`;
   // Keep the status pinned below whatever has been appended since.
   el.msgs.appendChild(turn.el);
   if (nearBottom()) scrollMsgs();
@@ -1048,9 +1058,12 @@ function turnEnd(usage, durationMs) {
   const tok = fmtTok(out);
   const bits = [fmtDur(durationMs ?? (Date.now() - turn.t0))];
   if (tok) bits.push(`↓ ${tok} tokens`);
-  turn.el.className = "turnstat done";
-  turn.el.innerHTML = `<span class="glyph spark">✻</span>` +
-    `<span class="tm">${esc(bits.join(" · "))}</span>`;
+  turn.el.className = "msg agent turnstat done";
+  turn.el.innerHTML =
+    `<div class="av blank"></div><div class="body"><div class="line">` +
+    `<span class="glyph spark">✻</span>` +
+    `<div class="tt"><span class="tm">${esc(bits.join(" · "))}</span></div>` +
+    `</div></div>`;
   el.msgs.appendChild(turn.el);
   turn = null;
 }
