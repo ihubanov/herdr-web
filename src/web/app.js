@@ -1217,8 +1217,12 @@ function handleFrame(f) {
   }
   if (f.type === "error") { appendSys(`agent refused: ${f.code ?? "error"} ${f.message ?? ""}`); return; }
 
-  if (f.type === "permission_request") { renderPermission(f); return; }
-  if (f.type === "question_request")   { renderQuestion(f); return; }
+  // A HITL request means a turn is in flight and waiting on a human — that is
+  // still "working" and deserves the status line. These return early, so the
+  // turn has to start here or a permission-first turn shows nothing at all.
+  const liveHitl = !(typeof f.seq === "number" && f.seq <= replayThrough);
+  if (f.type === "permission_request") { if (liveHitl) turnStart(); renderPermission(f); return; }
+  if (f.type === "question_request")   { if (liveHitl) turnStart(); renderQuestion(f); return; }
   if (f.type === "permission_resolved" || f.type === "question_resolved") { resolveHitl(f); return; }
 
   if (f.type !== "frame") return;
