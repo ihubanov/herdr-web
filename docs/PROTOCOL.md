@@ -304,6 +304,23 @@ as already-seen. Ask the reference client how it knows this
   emits. Not a token delta unless the SDKMessage itself is a `stream_event`.
 - `author` — present on user-originated frames when known.
 
+#### Turn boundaries and cost
+
+Clients that show a live turn indicator ("working, 5m 11s, 5.7k tokens") need
+two things from the stream. Both are optional; a client must render sensibly
+without either.
+
+- **Usage.** Put `usage` on the assistant message exactly where the Anthropic
+  API does — `msg.message.usage` with `input_tokens` / `output_tokens`. A turn
+  spanning several API calls reports usage per call; clients sum them.
+- **A closing `result`.** Emit `{"type":"result","subtype":"success",
+  "duration_ms":…,"usage":{…}}` when a turn finishes. Without it a client
+  cannot tell "still thinking" from "done and quiet", and must fall back to
+  the pane's `agent_status` — which is coarser and lags.
+
+Agents that report neither still work; the client just shows elapsed time, or
+no indicator at all.
+
 ### `participants` — presence changed
 
 ```jsonc

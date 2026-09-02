@@ -849,6 +849,12 @@ function alertBlocked(next) {
       }
     }
   }
+  // Not every agent emits a `result` frame to close a turn. Pane status is
+  // the backstop so the ticker can never run forever.
+  if (turn && streamPane) {
+    const st = next.find((f) => f.pane_id === streamPane)?.agent_status;
+    if (st && st !== "working") turnEnd(null, null);
+  }
   prev = new Map(next.map((f) => [f.pane_id, f.agent_status]));
 }
 
@@ -952,6 +958,7 @@ function openChat(paneId) {
 }
 
 function closeChat() {
+  if (turn) { clearInterval(turn.timer); turn = null; }
   if (streamSock) { try { streamSock.close(); } catch {} streamSock = null; }
   streamPane = null;
   seenReq.clear();
@@ -966,6 +973,97 @@ function appendSys(text) {
 }
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }
+
+/* ---------------------------------------------------------------------------
+ * Live turn status: "✻ Undulating… (5m 11s · ↓ 5.7k tokens)"
+ *
+ * Elapsed is measured here rather than taken from the stream — a turn's wall
+ * clock is a property of watching it, and not every agent reports duration.
+ * Tokens come from `message.usage` on assistant frames when the agent sends
+ * it; agents that don't simply get a line without the token half.
+ * ------------------------------------------------------------------------- */
+
+// Gerunds, cycled so a long turn still looks alive when nothing else moves.
+const GERUNDS = ["Undulating", "Percolating", "Ruminating", "Confabulating",
+  "Effervescing", "Cogitating", "Marinating", "Noodling", "Simmering",
+  "Puzzling", "Wrangling", "Tinkering", "Churning", "Brewing", "Whirring"];
+
+let turn = null;         // { t0, out, word, wordAt, el, timer }
+// Frames at or below this seq are replayed history, not live activity. Without
+// this a reconnect replays old assistant frames and starts a phantom turn whose
+// clock began whenever you happened to open the chat.
+let replayThrough = -1;
+
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), r = s % 60;
+  if (m < 60) return `${m}m ${r}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+function fmtTok(n) {
+  if (!n) return null;
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+  return `${(n / 1e6).toFixed(1)}M`;
+}
+
+function turnStart() {
+  if (turn) return;
+  const d = document.createElement("div");
+  d.className = "turnstat";
+  turn = { t0: Date.now(), out: 0, word: GERUNDS[(Math.random() * GERUNDS.length) | 0],
+           wordAt: Date.now(), el: d, timer: null };
+  el.msgs.appendChild(d);
+  turnTick();
+  turn.timer = setInterval(turnTick, 1000);
+}
+
+function turnTick() {
+  if (!turn) return;
+  const now = Date.now();
+  // Re-roll the word occasionally so a five-minute turn doesn't look stuck.
+  if (now - turn.wordAt > 12000) {
+    turn.word = GERUNDS[(Math.random() * GERUNDS.length) | 0];
+    turn.wordAt = now;
+  }
+  const tok = fmtTok(turn.out);
+  const bits = [fmtDur(now - turn.t0)];
+  if (tok) bits.push(`↓ ${tok} tokens`);
+  turn.el.innerHTML =
+    `<span class="glyph spark">✻</span>` +
+    `<span class="tw">${esc(turn.word)}…</span> ` +
+    `<span class="tm">(${esc(bits.join(" · "))})</span>`;
+  // Keep the status pinned below whatever has been appended since.
+  el.msgs.appendChild(turn.el);
+  if (nearBottom()) scrollMsgs();
+}
+
+/** Fold the ticking line into a static record of what the turn cost. */
+function turnEnd(usage, durationMs) {
+  if (!turn) return;
+  clearInterval(turn.timer);
+  const out = Math.max(turn.out, usage?.output_tokens ?? 0);
+  const tok = fmtTok(out);
+  const bits = [fmtDur(durationMs ?? (Date.now() - turn.t0))];
+  if (tok) bits.push(`↓ ${tok} tokens`);
+  turn.el.className = "turnstat done";
+  turn.el.innerHTML = `<span class="glyph spark">✻</span>` +
+    `<span class="tm">${esc(bits.join(" · "))}</span>`;
+  el.msgs.appendChild(turn.el);
+  turn = null;
+}
+
+function turnUsage(u) {
+  if (!turn || !u) return;
+  // Sum across the turn's API calls; each assistant frame reports its own.
+  if (typeof u.output_tokens === "number") turn.out += u.output_tokens;
+}
+
+function nearBottom() {
+  return el.msgs.scrollHeight - el.msgs.scrollTop - el.msgs.clientHeight < 120;
+}
 
 let lastSpeaker = null;          // suppress a repeated badge on the same speaker
 
@@ -1056,6 +1154,9 @@ function toolLine(name, input) {
 function handleFrame(f) {
   if (f.type === "ready") {
     lastSpeaker = null;
+    // `ready.seq` is a high-water mark: everything up to it is backlog.
+    replayThrough = typeof f.seq === "number" ? f.seq : -1;
+    if (turn) { clearInterval(turn.timer); turn = null; }
     el.msgs.innerHTML = "";
     appendSys(`connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
     return;
@@ -1064,7 +1165,11 @@ function handleFrame(f) {
   if (f.type === "_closed")   { appendSys(`stream closed: ${f.reason ?? ""}`); return; }
   if (f.type === "participants") return;
   // A completed turn is "done" even if no further frame follows it.
-  if (f.type === "frame" && f.msg?.type === "result") { collapseLive(); return; }
+  if (f.type === "frame" && f.msg?.type === "result") {
+    collapseLive();
+    turnEnd(f.msg.usage, f.msg.duration_ms);
+    return;
+  }
   if (f.type === "error") { appendSys(`agent refused: ${f.code ?? "error"} ${f.message ?? ""}`); return; }
 
   if (f.type === "permission_request") { renderPermission(f); return; }
@@ -1081,6 +1186,8 @@ function handleFrame(f) {
     appendSys(`${msg.subtype ?? "system"}${msg.model ? ` · ${msg.model}` : ""}`);
     return;
   }
+  const isReplay = typeof f.seq === "number" && f.seq <= replayThrough;
+  if (isAgent && !isReplay) { turnStart(); turnUsage(msg.message?.usage); }
   if (!Array.isArray(content)) return;
 
   for (const c of content) {
