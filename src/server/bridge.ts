@@ -664,12 +664,34 @@ const server = Bun.serve<WsData>({
       const d = ws.data;
 
       if (d.kind === "stream") {
-        if (!d.stream) return;
         const txt = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
         let m: any; try { m = JSON.parse(txt); } catch { return; }
         // The author is OURS, from the authenticated connection — never the
         // client's claim (docs/PROTOCOL.md §3).
         const who = d.who || "operator";
+
+        // A transcript-backed pane has no protocol channel back to the agent —
+        // a file is a record, not a way in. The reply still has to arrive, so it
+        // goes the only way available: as pane input, through the same queue the
+        // REST path uses. Without this the say was silently dropped while the
+        // composer cleared, which looked exactly like a broken send button.
+        if (!d.stream) {
+          if (d.tail && d.paneId && m.type === "say") {
+            const text = String(m.text ?? "");
+            if (text.trim()) {
+              try {
+                const q = enqueueSay(d.paneId, who, text);
+                ws.send(JSON.stringify({ type: "_queued", id: q.id, state: q.state }));
+              } catch (e) {
+                ws.send(JSON.stringify({
+                  type: "_sayfailed",
+                  reason: e instanceof Error ? e.message : String(e),
+                }));
+              }
+            }
+          }
+          return;
+        }
         if (m.type === "say") d.stream.say(who, String(m.text ?? ""));
         else if (m.type === "permission_reply")
           d.stream.permissionReply(String(m.request_id), m.decision === "allow" ? "allow" : "deny", who);
