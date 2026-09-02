@@ -301,6 +301,10 @@
   #dropveil.on{display:flex}
   #chatview{position:relative}
 
+  #ctlmode{font-size:11px;padding:3px 8px;border-radius:4px;color:var(--dim);
+    border:1px solid var(--line);background:var(--card);white-space:nowrap}
+  #ctlmode.on{color:var(--working);border-color:var(--working)}
+
   .loadmore{display:flex;justify-content:center;padding:6px 0 8px}
   .loadmore button{font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;
     color:var(--dim);background:var(--card);border:1px solid var(--line);border-radius:3px}
@@ -421,7 +425,7 @@
       <span id="ctlmeta"></span>
       <span id="whoami"></span>
       <span id="tstatus">—</span>
-      <button id="takeover">take control</button>
+      <span id="ctlmode" title="Control is taken automatically when you type">read-only</span>
       <button id="chatbtn" style="display:none">chat view</button>
       <button id="framebtn" style="display:none">view</button>
       <button id="detach">detach</button>

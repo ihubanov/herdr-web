@@ -101,7 +101,10 @@ async function receptive(paneId: string): Promise<boolean> {
     // Deliberately NOT also requiring the agent to be the sole foreground
     // process: agents keep persistent node children (MCP servers, sub-agents)
     // in the group while idle, and gating on that never passes.
-    return st === "idle" || st === "blocked" || st === "unknown";
+    // "done" means the agent finished its turn and is sitting at the prompt —
+    // the single most receptive moment there is. Omitting it queued messages to
+    // a settled pane forever, which looked like a broken send button.
+    return st === "idle" || st === "done" || st === "blocked" || st === "unknown";
   } catch {
     return false;
   }

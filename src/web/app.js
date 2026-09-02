@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 const el = {
   tree: $("tree"), search: $("search"), conn: $("conn"), crumb: $("crumb"),
   term: $("term"), fleet: $("fleet"), ctl: $("ctl"), ctlmeta: $("ctlmeta"),
-  tstatus: $("tstatus"), takeover: $("takeover"), detach: $("detach"),
+  tstatus: $("tstatus"), ctlmode: $("ctlmode"), detach: $("detach"),
   askctx: $("askctx"), askq: $("askq"), presetrow: $("presetrow"),
   statusbar: $("statusbar"), whoami: $("whoami"),
   chatview: $("chatview"), msgs: $("msgs"), cin: $("cin"), cgo: $("cgo"),
@@ -258,7 +258,7 @@ function attach(f, mode = "observe") {
       el.tstatus.textContent = `${me?.label ?? "you"}: — attribution is locked`;
       setTimeout(() => { if (activeMode === "control") el.tstatus.textContent = "control — type in the terminal"; }, 1600);
     } else if (m.type === "_readonly") {
-      el.tstatus.textContent = "read-only — click take control";
+      el.tstatus.textContent = "read-only — just start typing to take control";
     } else if (m.type === "_closed") {
       el.tstatus.textContent = `closed: ${m.reason}`;
     }
@@ -283,10 +283,13 @@ function detach() {
 }
 
 function renderCtl() {
-  el.takeover.disabled = !selected || activeMode === "control";
-  el.takeover.textContent = activeMode === "control" ? "controlling" : "take control";
+  // Control is taken automatically by typing (see term.onData), so there is no
+  // button — only an indicator of which mode you are in. A button that merely
+  // does what typing already does is a step the user has to learn for nothing.
+  el.ctlmode.textContent = activeMode === "control" ? "controlling" : "read-only";
+  el.ctlmode.classList.toggle("on", activeMode === "control");
+  el.ctlmode.style.display = selected && view === "terminal" ? "" : "none";
 }
-el.takeover.onclick = () => { const f = entry(selected); if (f) attach(f, "control"); };
 el.detach.onclick = detach;
 
 // ------------------------------------------------------------------ views
@@ -767,10 +770,12 @@ function renderChat() {
   const q = queueState.filter((m) => m.paneId === selected);
   const waiting = q.filter((m) => m.state === "queued" || m.state === "sending");
   const failed = q.filter((m) => m.state === "failed");
-  el.chatq.innerHTML = [
-    waiting.length ? `<span class="q">${waiting.length} queued</span>` : "",
-    failed.length ? `<span class="f">${failed.length} failed</span>` : "",
-  ].filter(Boolean).join(" · ");
+  if (!pendingSay) {
+    el.chatq.innerHTML = [
+      waiting.length ? `<span class="q">${waiting.length} queued</span>` : "",
+      failed.length ? `<span class="f">${failed.length} failed</span>` : "",
+    ].filter(Boolean).join(" · ");
+  }
   setTimeout(refit, 30);
 }
 
@@ -892,8 +897,13 @@ function alertBlocked(next) {
   // fleet poll.
   if (turn && streamPane) {
     const st = next.find((f) => f.pane_id === streamPane)?.agent_status;
+    // End on an explicit terminal state. Requiring "working" to have been seen
+    // first meant a turn whose working window fell between polls ticked forever;
+    // testing "not working" instead ended every turn on panes stuck at
+    // "unknown". Naming the terminal states avoids both. "blocked" is NOT one —
+    // an agent waiting on a human is still mid-turn.
     if (st === "working") turn.sawWorking = true;
-    else if (turn.sawWorking && st && st !== "unknown") turnEnd(null, null);
+    else if (st === "idle" || st === "done") turnEnd(null, null);
   }
   prev = new Map(next.map((f) => [f.pane_id, f.agent_status]));
 }
@@ -1252,6 +1262,8 @@ let historyBusy = false;
 // this they would look live and start a turn clock for a conversation that ended
 // long ago — the same trap ready.seq posed, arriving by a different door.
 let renderingHistory = false;
+let pendingSay = false;
+let pendingSayTimer = null;
 
 function fmtDur(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -1275,7 +1287,7 @@ function turnStart() {
   // in the same column as every ● above it. A bespoke grid drifts out of
   // alignment the moment the message layout changes.
   d.className = "msg agent turnstat";
-  turn = { t0: Date.now(), out: 0, sawWorking: false,
+  turn = { t0: Date.now(), out: 0, sawWorking: false, lastFrame: Date.now(),
            word: GERUNDS[(Math.random() * GERUNDS.length) | 0],
            wordAt: Date.now(), el: d, timer: null };
   el.msgs.appendChild(d);
@@ -1283,9 +1295,15 @@ function turnStart() {
   turn.timer = setInterval(turnTick, 1000);
 }
 
+const TURN_QUIET_MS = 25000;
+
 function turnTick() {
   if (!turn) return;
   const now = Date.now();
+  // Transcripts carry no `result` record, and the fleet's cached agent_status
+  // can lag or sit at "unknown", so neither is a reliable end-of-turn signal on
+  // its own. Silence is: once nothing has arrived for a while, the turn is over.
+  if (now - turn.lastFrame > TURN_QUIET_MS) { turnEnd(null, null); return; }
   // Re-roll the word occasionally so a five-minute turn doesn't look stuck.
   if (now - turn.wordAt > 12000) {
     turn.word = GERUNDS[(Math.random() * GERUNDS.length) | 0];
@@ -1568,6 +1586,20 @@ function handleFrame(f) {
       : `connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
     return;
   }
+  if (f.type === "_queued") {
+    // The agent's own copy arrives via the transcript a moment later; until it
+    // does, say so rather than leaving an empty composer as the only feedback.
+    pendingSay = true;
+    el.chatq.textContent = f.state && f.state !== "sent" ? `sending… (${f.state})` : "sending…";
+    clearTimeout(pendingSayTimer);
+    pendingSayTimer = setTimeout(() => { pendingSay = false; el.chatq.textContent = ""; }, 20000);
+    return;
+  }
+  if (f.type === "_sayfailed") {
+    pendingSay = false; clearTimeout(pendingSayTimer); el.chatq.textContent = "";
+    appendSys(`send failed: ${f.reason ?? "unknown"}`);
+    return;
+  }
   if (f.type === "_nostream") { appendSys("this agent does not expose a structured stream"); return; }
   if (f.type === "_closed")   { appendSys(`stream closed: ${f.reason ?? ""}`); return; }
   if (f.type === "participants") return;
@@ -1604,6 +1636,10 @@ function handleFrame(f) {
     return;
   }
   const isReplay = renderingHistory || (typeof f.seq === "number" && f.seq <= replayThrough);
+  if (turn && !isReplay) turn.lastFrame = Date.now();
+  if (pendingSay && !isReplay && role === "user") {
+    pendingSay = false; clearTimeout(pendingSayTimer); el.chatq.textContent = "";
+  }
   if (isAgent && !isReplay) { turnStart(); turnUsage(msg.message?.usage); }
   if (!Array.isArray(content)) return;
 

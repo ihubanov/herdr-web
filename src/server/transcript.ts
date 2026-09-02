@@ -72,7 +72,15 @@ function toMessage(rec: any): any | null {
   if (rec.isSidechain) return null;
   if (t === "assistant" || t === "user") {
     const m = rec.message;
-    if (!m || !Array.isArray(m.content)) return null;
+    if (!m) return null;
+    // A user PROMPT stores content as a plain string, while tool results and
+    // assistant messages use the block array. Requiring an array silently
+    // dropped every message the human typed.
+    if (typeof m.content === "string") {
+      if (!m.content.trim()) return null;
+      return { type: t, message: { ...m, content: [{ type: "text", text: m.content }] } };
+    }
+    if (!Array.isArray(m.content)) return null;
     return { type: t, message: m };
   }
   if (t === "system") return { type: "system", subtype: rec.subtype, model: rec.model };
