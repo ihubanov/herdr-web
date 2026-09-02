@@ -181,6 +181,28 @@ const server = createServer((sock) => {
             "writes outside the sandbox", Number(cmd[1]) || 120000);
           if (cmd[0] !== "/both") continue;
         }
+        if (cmd[0] === "/render") {
+          // Exercises the render paths a real transcript hits.
+          publish({ type: "assistant", message: { role: "assistant",
+            content: [{ type: "thinking", thinking: "checking the session directory and git state" }] } });
+          setTimeout(() => publish({ type: "assistant", message: { role: "assistant",
+            content: [{ type: "tool_use", id: "t1", name: "Bash", input: {
+              command: "ls -la /home/user/.sessions/8013bd38-ac15-40b6-a277-fb5e9c262b9f/ 2>&1; git -C /home/user/.sessions/8013bd38 status 2>&1 | head -5",
+              description: "List session dir and git status" } }] } }), 200);
+          setTimeout(() => publish({ type: "user", message: { role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t1",
+              content: "total 8\ndrwxr-xr-x 2 user user 4096 Sep  2 06:17 .\ndrwxr-xr-x 3 user user 4096 Sep  2 06:17 ..\nfatal: not a git repository (or any of the parent directories): .git" }] } }), 400);
+          setTimeout(() => publish({ type: "assistant", message: { role: "assistant",
+            content: [{ type: "tool_use", id: "t2", name: "Read", input: { file_path: "/etc/hosts" } }] } }), 600);
+          setTimeout(() => publish({ type: "user", message: { role: "user",
+            content: [{ type: "tool_result", tool_use_id: "t2",
+              content: JSON.stringify({ observations: Array.from({length:14},(_,i)=>({
+                memory_id:`db74213c-a57b-4775-9f40-e6d3b5ff90${i}`, domain:"session-lifecycle",
+                status:"committed", confidence:0.847, content:"Session ended (other). Direct-write SessionEnd hook recording the lifecycle event; per-turn content is captured by the agent's own calls." })) }) }] } }), 800);
+          setTimeout(() => publish({ type: "assistant", message: { role: "assistant",
+            content: [{ type: "text", text: "The working dir resolved to /home/user/project — a git repo on main, clean, with recent commits. What would you like to do?" }] } }), 1100);
+          continue;
+        }
         if (cmd[0] === "/question" || cmd[0] === "/both") {
           askQuestion([{
             id: "q1", header: "Storage", question: "Which database should we use?",

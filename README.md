@@ -200,8 +200,14 @@ For agents that implement [`herdr-agent-stream/1`](docs/PROTOCOL.md), a **chat
 view** button appears in the control bar. It renders the session as a
 conversation instead of a terminal:
 
-- every message carries a real badge — `bob` for you, `Alice(AI)` for the agent
-- thinking, tool calls and tool results render as distinct blocks
+- rendered to sit beside the terminal, not as a chat app: monospace, tight
+  leading, and the agent's own glyphs — `●` opens a turn, `✳` marks reasoning,
+  `⎿` attaches a result to the call that produced it
+- the speaker badge appears only when the speaker **changes**; an agent turn is
+  often a dozen frames and stamping each one was pure noise
+- a tool call shows the command, not the envelope: `Bash ls -la /srv` rather
+  than `Bash({"command":"ls -la /srv","description":…})`
+- long output is clamped with a fade; click to expand
 - permission prompts get allow/deny buttons; `AskUserQuestion` gets its options
   as buttons, and resolution dismisses the prompt for every viewer
 - a composer at the bottom, because there is no terminal to type into
