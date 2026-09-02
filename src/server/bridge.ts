@@ -16,7 +16,7 @@ import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from ".
 import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
-import { findTranscript, followTranscript, type TranscriptHandle } from "./transcript.ts";
+import { findTranscript, followTranscript, readBefore, type TranscriptHandle } from "./transcript.ts";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.HERDR_WEB_PORT || 7878);
@@ -413,6 +413,26 @@ const server = Bun.serve<WsData>({
           transcript: transcript ? { session: transcript.session } : null,
           iframe, iframeRejected, iframePolicy: IFRAME_POLICY,
         });
+      }
+
+      // Page backwards through a pane's transcript. `before` is the byte offset
+      // the client currently holds (from ready.historyFrom, then from each
+      // response), so pages abut exactly with no gap and no duplicate.
+      if (url.pathname === "/api/history") {
+        const paneId = url.searchParams.get("pane_id");
+        const before = Number(url.searchParams.get("before") ?? "0");
+        if (!paneId || !Number.isFinite(before) || before < 0) {
+          return Response.json({ error: "pane_id and non-negative before required" }, { status: 400 });
+        }
+        if (before === 0) return Response.json({ frames: [], startOffset: 0, done: true });
+        try {
+          const sid = (await call("pane.get", { pane_id: paneId }))?.pane?.agent_session?.value;
+          const path = typeof sid === "string" && sid ? await findTranscript(sid) : null;
+          if (!path) return Response.json({ frames: [], startOffset: 0, done: true });
+          return Response.json(await readBefore(path, before));
+        } catch {
+          return Response.json({ frames: [], startOffset: before, done: false });
+        }
       }
 
       if (url.pathname === "/api/presence") {

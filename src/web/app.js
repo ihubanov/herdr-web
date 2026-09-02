@@ -1013,6 +1013,65 @@ function appendSys(text) {
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }
 
+/* ------------------------------------------------------------------ history
+ * The stream opens on the tail of the transcript; older turns are paged in on
+ * demand. Frames are rendered into a detached node first, then inserted above
+ * the existing ones and the scroll position corrected by exactly the height
+ * that was added — otherwise loading history yanks the reader somewhere else.
+ * -------------------------------------------------------------------------- */
+function makeLoadMore() {
+  const d = document.createElement("div");
+  d.className = "loadmore";
+  d.innerHTML = `<button type="button">load earlier messages</button>`;
+  d.querySelector("button").onclick = () => loadHistory();
+  return d;
+}
+
+async function loadHistory() {
+  if (historyBusy || historyFrom <= 0 || !streamPane) return;
+  historyBusy = true;
+  const bar = el.msgs.querySelector(".loadmore");
+  const btn = bar?.querySelector("button");
+  if (btn) { btn.disabled = true; btn.textContent = "loading…"; }
+  try {
+    const r = await fetch(auth(
+      `/api/history?pane_id=${encodeURIComponent(streamPane)}&before=${historyFrom}`));
+    const d = await r.json();
+    const frames = Array.isArray(d.frames) ? d.frames : [];
+
+    // Render detached so a half-built history never flickers into the log.
+    const holder = document.createElement("div");
+    const realMsgs = el.msgs, realSpeaker = lastSpeaker;
+    el.msgs = holder; lastSpeaker = null; renderingHistory = true;
+    try { for (const f of frames) handleFrame(f); }
+    finally { el.msgs = realMsgs; lastSpeaker = realSpeaker; renderingHistory = false; }
+
+    const before = el.msgs.scrollHeight;
+    const anchor = bar ? bar.nextSibling : el.msgs.firstChild;
+    while (holder.firstChild) el.msgs.insertBefore(holder.firstChild, anchor);
+    el.msgs.scrollTop += el.msgs.scrollHeight - before;
+    markOverflow(el.msgs);
+
+    historyFrom = Number(d.startOffset ?? 0) || 0;
+    if (d.done || historyFrom <= 0) {
+      bar?.remove();
+      const top = document.createElement("div");
+      top.className = "sys";
+      top.textContent = "beginning of the conversation";
+      el.msgs.insertBefore(top, el.msgs.firstChild);
+    } else if (btn) {
+      btn.disabled = false; btn.textContent = "load earlier messages";
+    }
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = "load earlier messages (retry)"; }
+  } finally { historyBusy = false; }
+}
+
+// Reaching the top pulls the next page in, so scrolling back just works.
+el.msgs.addEventListener("scroll", () => {
+  if (el.msgs.scrollTop < 40 && historyFrom > 0 && !historyBusy) void loadHistory();
+});
+
 /* ---------------------------------------------------------------------------
  * Live turn status: "✻ Undulating… (5m 11s · ↓ 5.7k tokens)"
  *
@@ -1032,6 +1091,14 @@ let turn = null;         // { t0, out, word, wordAt, el, timer }
 // this a reconnect replays old assistant frames and starts a phantom turn whose
 // clock began whenever you happened to open the chat.
 let replayThrough = -1;
+// Byte offset in the transcript that the loaded history starts at; 0 means we
+// are already showing the beginning of the conversation.
+let historyFrom = 0;
+let historyBusy = false;
+// History frames carry no seq, so the replay test cannot recognise them. Without
+// this they would look live and start a turn clock for a conversation that ended
+// long ago — the same trap ready.seq posed, arriving by a different door.
+let renderingHistory = false;
 
 function fmtDur(ms) {
   const s = Math.max(0, Math.round(ms / 1000));
@@ -1171,6 +1238,7 @@ function msgBlock(author, isAgent, innerHTML) {
   d.className = `msg ${isAgent ? "agent" : "user"}${mine ? " me" : ""}${repeat ? "" : " turn"}`;
   d.innerHTML = `${avatarHTML(author, isAgent, repeat)}<div class="body">${innerHTML}</div>`;
   el.msgs.appendChild(d);
+  markOverflow(d);
   scrollMsgs();
   return d;
 }
@@ -1184,21 +1252,54 @@ function msgBlock(author, isAgent, innerHTML) {
  * `live` marks the currently-expanded block; `collapseLive()` retires it.
  */
 function clamped(html, cls, live = false) {
-  return `<div class="${cls} clamp${live ? " live open" : ""}">${html}</div>`;
+  const open = live ? " open" : "";
+  return `<div class="clampwrap${live ? " isopen" : ""}">` +
+    `<div class="${cls} clamp${live ? " live" : ""}${open}">${html}</div>` +
+    `<button class="clamptog" type="button">${live ? "collapse" : "expand"}</button>` +
+    `</div>`;
+}
+
+/**
+ * Show the toggle only where the content actually overflows. Measured after
+ * insertion because a block's height is not knowable from its markup.
+ */
+function markOverflow(root) {
+  for (const w of root.querySelectorAll(".clampwrap")) {
+    const c = w.querySelector(".clamp");
+    if (!c) continue;
+    const over = c.scrollHeight > c.clientHeight + 2 || w.classList.contains("isopen");
+    w.classList.toggle("overflowing", over);
+  }
 }
 
 function collapseLive() {
   for (const n of el.msgs.querySelectorAll(".clamp.live")) {
     n.classList.remove("live");
+    const wrap = n.closest(".clampwrap");
     // Only actually collapse blocks tall enough to be worth hiding; a
     // three-line result flapping shut looks like a glitch.
-    if (n.scrollHeight > 190) n.classList.remove("open");
-    else n.classList.add("open");
+    const shut = n.scrollHeight > 190;
+    n.classList.toggle("open", !shut);
+    if (wrap) {
+      wrap.classList.toggle("isopen", !shut);
+      const b = wrap.querySelector(".clamptog");
+      if (b) b.textContent = shut ? "expand" : "collapse";
+      markOverflow(wrap.parentNode || el.msgs);
+    }
   }
 }
 el.msgs.addEventListener("click", (e) => {
-  const c = e.target.closest(".clamp");
-  if (c && !c.classList.contains("open")) c.classList.add("open");
+  const wrap = e.target.closest(".clampwrap");
+  if (!wrap) return;
+  // The block itself scrolls and can be selected, so only the toggle flips it.
+  // Clicking the body to expand also meant every drag-select expanded a block.
+  if (!e.target.closest(".clamptog")) return;
+  const c = wrap.querySelector(".clamp");
+  if (!c) return;
+  const nowOpen = !c.classList.contains("open");
+  c.classList.toggle("open", nowOpen);
+  wrap.classList.toggle("isopen", nowOpen);
+  e.target.textContent = nowOpen ? "collapse" : "expand";
 });
 
 /**
@@ -1238,6 +1339,8 @@ function handleFrame(f) {
     replayThrough = typeof f.seq === "number" ? f.seq : -1;
     if (turn) { clearInterval(turn.timer); turn = null; }
     el.msgs.innerHTML = "";
+    historyFrom = Number(f.historyFrom ?? 0) || 0;
+    if (historyFrom > 0) el.msgs.appendChild(makeLoadMore());
     appendSys(f.source === "transcript"
       ? `reading the session transcript${f.session ? ` · ${f.session}` : ""} — history and live updates, replies go in as keystrokes`
       : `connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
@@ -1257,7 +1360,7 @@ function handleFrame(f) {
   // A HITL request means a turn is in flight and waiting on a human — that is
   // still "working" and deserves the status line. These return early, so the
   // turn has to start here or a permission-first turn shows nothing at all.
-  const liveHitl = !(typeof f.seq === "number" && f.seq <= replayThrough);
+  const liveHitl = !renderingHistory && !(typeof f.seq === "number" && f.seq <= replayThrough);
   if (f.type === "permission_request") { if (liveHitl) turnStart(); renderPermission(f); return; }
   if (f.type === "question_request")   { if (liveHitl) turnStart(); renderQuestion(f); return; }
   if (f.type === "permission_resolved" || f.type === "question_resolved") { resolveHitl(f); return; }
@@ -1272,7 +1375,7 @@ function handleFrame(f) {
     appendSys(`${msg.subtype ?? "system"}${msg.model ? ` · ${msg.model}` : ""}`);
     return;
   }
-  const isReplay = typeof f.seq === "number" && f.seq <= replayThrough;
+  const isReplay = renderingHistory || (typeof f.seq === "number" && f.seq <= replayThrough);
   if (isAgent && !isReplay) { turnStart(); turnUsage(msg.message?.usage); }
   if (!Array.isArray(content)) return;
 
