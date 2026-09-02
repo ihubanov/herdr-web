@@ -234,14 +234,31 @@
 
   /* Transient output is expanded while live, then collapses behind a fade.
      The transition is what makes it read as "finished" rather than as a jump. */
-  .clamp{max-height:11em;overflow:hidden;position:relative;cursor:pointer;
-    transition:max-height .18s ease}
-  .clamp.live{cursor:default}
-  .clamp:not(.open):hover::after{background:linear-gradient(transparent,var(--card))}
-  .clamp::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.6em;
-    background:linear-gradient(transparent,var(--termbg))}
-  .clamp.open{max-height:none;cursor:default}
-  .clamp.open::after{display:none}
+  /* A clamped block scrolls INSIDE its box while collapsed, so long output can
+     be read without expanding it and shoving the rest of the log off screen.
+     The fade and the toggle live on the wrapper, not the scroller — inside they
+     would scroll away with the content. */
+  .loadmore{display:flex;justify-content:center;padding:6px 0 8px}
+  .loadmore button{font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;
+    color:var(--dim);background:var(--card);border:1px solid var(--line);border-radius:3px}
+  .loadmore button:hover:not(:disabled){color:var(--fg);border-color:var(--dim)}
+  .loadmore button:disabled{opacity:.5;cursor:default}
+  .clampwrap{position:relative;min-width:0}
+  .clamp{max-height:11em;overflow-y:auto;overflow-x:auto;position:relative;
+    scrollbar-width:thin}
+  .clamp.open{max-height:none;overflow:visible}
+  .clampwrap::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.6em;
+    pointer-events:none;background:linear-gradient(transparent,var(--termbg));
+    opacity:0;transition:opacity .15s}
+  .clampwrap.overflowing:not(.isopen)::after{opacity:1}
+  /* Toggle appears only when there is something to toggle. */
+  .clamptog{position:absolute;right:2px;bottom:1px;z-index:1;display:none;
+    font:inherit;font-size:10.5px;line-height:1;padding:2px 6px;cursor:pointer;
+    color:var(--dim);background:var(--card);border:1px solid var(--line);
+    border-radius:3px}
+  .clamptog:hover{color:var(--fg);border-color:var(--dim)}
+  .clampwrap.overflowing > .clamptog{display:block}
+  .clampwrap.isopen > .clamptog{position:sticky;float:right;margin-top:-1.4em}
   .more{color:var(--idle);font-size:11px;cursor:pointer;padding-left:9px}
 
   .sys{color:var(--faint);font-size:11.5px;padding:2px 14px 2px 118px}

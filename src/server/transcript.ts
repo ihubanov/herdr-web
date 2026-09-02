@@ -45,17 +45,21 @@ export async function findTranscript(sessionId: string): Promise<string | null> 
  * Read the tail of a file without loading it. Transcripts reach tens of MB, and a
  * pane opening must not pull that through memory to show the last few turns.
  */
-async function readTail(path: string, maxBytes: number): Promise<{ text: string; size: number; whole: boolean }> {
+async function readTail(
+  path: string, maxBytes: number,
+): Promise<{ text: string; size: number; startOffset: number }> {
   const st = await stat(path);
   const size = st.size;
-  if (size <= maxBytes) return { text: await readFile(path, "utf8"), size, whole: true };
+  if (size <= maxBytes) return { text: await readFile(path, "utf8"), size, startOffset: 0 };
   const fh = await open(path, "r");
   try {
     const buf = Buffer.alloc(maxBytes);
     await fh.read(buf, 0, maxBytes, size - maxBytes);
     // Drop the leading partial line — it is a fragment of a record we cut through.
     const text = buf.toString("utf8");
-    return { text: text.slice(text.indexOf("\n") + 1), size, whole: false };
+    const nl = text.indexOf("\n");
+    const body = text.slice(nl + 1);
+    return { text: body, size, startOffset: size - Buffer.byteLength(body, "utf8") };
   } finally { await fh.close(); }
 }
 
@@ -73,6 +77,64 @@ function toMessage(rec: any): any | null {
   }
   if (t === "system") return { type: "system", subtype: rec.subtype, model: rec.model };
   return null;
+}
+
+/**
+ * Read the chunk of a transcript immediately BEFORE `endOffset`, for paging
+ * backwards through history. Returns frames oldest-first plus the offset the
+ * chunk starts at, which is the cursor for the next page. `done` when we have
+ * reached the start of the file.
+ */
+export async function readBefore(
+  path: string, endOffset: number, maxBytes = 512 * 1024, maxChunks = 12,
+): Promise<{ frames: any[]; startOffset: number; done: boolean }> {
+  // Keep walking back until we actually find something to show. Transcripts are
+  // mostly attachment records, so a whole chunk can be skippable; returning an
+  // empty page would make the client fetch again and again to make progress.
+  let cursor = endOffset;
+  for (let i = 0; i < maxChunks; i++) {
+    const page = await readOneBefore(path, cursor, maxBytes);
+    if (page.frames.length || page.done) return page;
+    if (page.startOffset >= cursor) return { ...page, done: true };  // no progress
+    cursor = page.startOffset;
+  }
+  return { frames: [], startOffset: cursor, done: cursor <= 0 };
+}
+
+async function readOneBefore(
+  path: string, endOffset: number, maxBytes: number,
+): Promise<{ frames: any[]; startOffset: number; done: boolean }> {
+  if (endOffset <= 0) return { frames: [], startOffset: 0, done: true };
+  const start = Math.max(0, endOffset - maxBytes);
+  const fh = await open(path, "r");
+  let text: string;
+  try {
+    const buf = Buffer.alloc(endOffset - start);
+    await fh.read(buf, 0, endOffset - start, start);
+    text = buf.toString("utf8");
+  } finally { await fh.close(); }
+
+  // Unless we reached byte 0, the first line is a fragment of a record we cut
+  // through — drop it, and report the offset AFTER it so the next page ends
+  // exactly where this one begins with no gap and no duplicate.
+  let realStart = start;
+  if (start > 0) {
+    const nl = text.indexOf("\n");
+    if (nl === -1) return { frames: [], startOffset: start, done: start === 0 };
+    realStart = start + Buffer.byteLength(text.slice(0, nl + 1), "utf8");
+    text = text.slice(nl + 1);
+  }
+
+  const frames: any[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    let rec: any;
+    try { rec = JSON.parse(line); } catch { continue; }
+    const msg = toMessage(rec);
+    if (!msg) continue;
+    frames.push({ type: "frame", ts: Date.parse(rec.timestamp) || Date.now(), msg });
+  }
+  return { frames, startOffset: realStart, done: realStart <= 0 };
 }
 
 export interface TranscriptHandle {
@@ -126,7 +188,7 @@ export function followTranscript(
 
   void (async () => {
     try {
-      const { text, size } = await readTail(path, tailBytes);
+      const { text, size, startOffset } = await readTail(path, tailBytes);
       const backlog = parseLines(text);
       offset = size;
       // Order matters: `ready` FIRST, then the backlog — the live protocol does
@@ -137,6 +199,8 @@ export function followTranscript(
       emit({
         type: "ready", proto: 1, agent: "claude", session: opts.session,
         seq: backlog.length, source: "transcript",
+        // Where this backlog began; 0 means the whole file is already shown.
+        historyFrom: startOffset,
       });
       emitAll(backlog);
     } catch (e) {
