@@ -392,9 +392,12 @@ function applyChatBtn(c) {
   if (!has) { el.chatbtn.title = ""; return; }
   const toTerm = view === "chat";
   el.chatbtn.textContent = toTerm ? "terminal" : "chat view";
+  const fromFile = c?.source === "transcript";
   el.chatbtn.title = toTerm
     ? "Raw terminal output for this pane"
-    : "Message-level chat with per-message attribution";
+    : (fromFile
+        ? "Chat rendered from the session transcript on disk"
+        : "Message-level chat with per-message attribution");
 }
 
 el.chatbtn.onclick = () => {
@@ -1116,9 +1119,41 @@ function speakerOf(author, isAgent) {
   return isAgent ? `agent:${me?.agentName || "agent"}` : `user:${author || "user"}`;
 }
 
+/**
+ * The badge column is sized to the widest name actually present, not to a fixed
+ * guess. A fixed width either clips a long name or leaves a gutter of dead space
+ * in front of every line when all the names are short.
+ *
+ * Measured rather than computed from character count: the badge is bold and
+ * proportional, so "Jack(AI)" and "mexico" are not the same width at equal
+ * length. One measure per NEW name, not per message.
+ */
+const seenNames = new Set();
+let nameMeasure = null;
+
+function fitBadgeColumn(label) {
+  if (!label || seenNames.has(label)) return;
+  seenNames.add(label);
+  if (!nameMeasure) {
+    nameMeasure = document.createElement("span");
+    nameMeasure.className = "av avmeasure";
+    el.msgs.appendChild(nameMeasure);
+  }
+  let widest = 0;
+  for (const n of seenNames) {
+    nameMeasure.textContent = n;
+    widest = Math.max(widest, nameMeasure.offsetWidth);
+  }
+  // Floor keeps short-name conversations from looking cramped against the glyph;
+  // ceiling stops one pathological name from eating the message column.
+  const px = Math.min(220, Math.max(48, Math.ceil(widest) + 2));
+  el.msgs.style.setProperty("--avw", `${px}px`);
+}
+
 function avatarHTML(author, isAgent, repeat) {
-  const label = isAgent ? `${esc(me?.agentName || "agent")}(AI)` : esc(author || "user");
-  return `<span class="av${repeat ? " blank" : ""}">${label}</span>`;
+  const raw = isAgent ? `${me?.agentName || "agent"}(AI)` : (author || "user");
+  fitBadgeColumn(raw);
+  return `<span class="av${repeat ? " blank" : ""}">${esc(raw)}</span>`;
 }
 
 /**
@@ -1203,7 +1238,9 @@ function handleFrame(f) {
     replayThrough = typeof f.seq === "number" ? f.seq : -1;
     if (turn) { clearInterval(turn.timer); turn = null; }
     el.msgs.innerHTML = "";
-    appendSys(`connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
+    appendSys(f.source === "transcript"
+      ? `reading the session transcript${f.session ? ` · ${f.session}` : ""} — history and live updates, replies go in as keystrokes`
+      : `connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
     return;
   }
   if (f.type === "_nostream") { appendSys("this agent does not expose a structured stream"); return; }
