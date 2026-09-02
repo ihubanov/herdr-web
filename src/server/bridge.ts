@@ -7,8 +7,10 @@
  *   - token is generated per-run and printed once, or set HERDR_WEB_TOKEN
  *   - RPC proxying is allow-listed by method prefix, not open passthrough
  */
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join, extname, normalize } from "node:path";
 import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
 import { openTerminalSession, type TerminalSession } from "./terminal-bridge.ts";
@@ -55,6 +57,9 @@ const AGENT_NAME = (process.env.HERDR_WEB_AGENT_NAME || "").trim();
  *   on        any http(s) origin
  */
 type IframePolicy = "off" | "loopback" | "on";
+const UPLOAD_DIR = process.env.HERDR_WEB_UPLOAD_DIR
+  || join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "herdr-web", "uploads");
+const UPLOAD_MAX = Number(process.env.HERDR_WEB_UPLOAD_MAX_BYTES || 25 * 1024 * 1024);
 const IFRAME_POLICY: IframePolicy = (() => {
   const v = (process.env.HERDR_WEB_IFRAMES || "off").trim().toLowerCase();
   return v === "on" || v === "loopback" ? v : "off";
@@ -432,6 +437,35 @@ const server = Bun.serve<WsData>({
           return Response.json(await readBefore(path, before));
         } catch {
           return Response.json({ frames: [], startOffset: before, done: false });
+        }
+      }
+
+      // Attachments. The chat cannot hand an agent bytes — it drives a terminal
+      // — but every coding agent reads file paths. So a dropped or pasted file
+      // is written to a known directory and its PATH goes into the message.
+      if (url.pathname === "/api/upload" && req.method === "POST") {
+        try {
+          const form = await req.formData();
+          const file = form.get("file");
+          if (!(file instanceof File)) {
+            return Response.json({ error: "file field required" }, { status: 400 });
+          }
+          if (file.size > UPLOAD_MAX) {
+            return Response.json(
+              { error: `file too large (max ${Math.floor(UPLOAD_MAX / 1048576)}MB)` }, { status: 413 });
+          }
+          // Name is attacker-controlled: keep an extension for the agent's
+          // benefit, discard everything else about the path.
+          const base = (file.name || "upload").split(/[\\/]/).pop() || "upload";
+          const safe = base.replace(/[^A-Za-z0-9._-]/g, "_").slice(-64) || "upload";
+          const dir = join(UPLOAD_DIR, new Date().toISOString().slice(0, 10));
+          await mkdir(dir, { recursive: true });
+          const path = join(dir, `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}-${safe}`);
+          await writeFile(path, Buffer.from(await file.arrayBuffer()));
+          return Response.json({ path, name: safe, size: file.size, type: file.type || null });
+        } catch (e) {
+          return Response.json(
+            { error: e instanceof Error ? e.message : "upload failed" }, { status: 400 });
         }
       }
 
