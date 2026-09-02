@@ -65,6 +65,14 @@ let me = null;                    // {name,label,isAdmin,multiuser,users}
 let presence = {};                // paneId -> [labels]
 let queueState = [];              // recent queued/sent messages
 let capability = null;            // structured-stream capability of the open pane
+// Chat is the default view for agents that expose a stream. Flipping to the
+// terminal sticks, so someone who prefers the raw pane isn't fighting the app
+// on every open. Panes with no stream ignore this entirely.
+let preferChat = LS.get("preferChat", true);
+// Capability is a per-pane round trip. Caching it means only the FIRST open of
+// a pane can flash the terminal before landing on chat; every later open goes
+// straight there.
+const capCache = new Map();
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -184,24 +192,32 @@ function attach(f, mode = "observe") {
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = f.pane_id;
   activeMode = mode;
-  setView("terminal");
+  // Adopt the cached capability BEFORE switching views — setView paints the
+  // button from `capability`, and a stale value flashes the previous pane's
+  // state for a frame.
+  const known = capCache.get(f.pane_id) ?? null;
+  capability = known;
+  // If we already know this pane streams, go straight to chat rather than
+  // showing the terminal and yanking it away a moment later.
+  const toChat = !!known?.stream && preferChat;
+  setView(toChat ? "chat" : "terminal");
   el.crumb.innerHTML = `<b>${esc(f.title)}</b>${f.task ? ` — ${esc(f.task)}` : ""}`;
   el.ctlmeta.textContent = [f.repo, f.branch, f.cwd].filter(Boolean).join("  ·  ");
   el.ctl.classList.add("on");
   positionWhoami();
 
-  // Ask once per open whether this agent exposes herdr-agent-stream/1.
-  capability = null;
-  el.chatbtn.style.display = "none";
+  if (toChat) openChat(f.pane_id);
+  // Re-ask anyway: an agent can start or stop advertising between opens.
   fetch(auth(`/api/capability?pane_id=${encodeURIComponent(f.pane_id)}`))
     .then((r) => r.json())
     .then((c) => {
       if (selected !== f.pane_id) return;         // user moved on
       capability = c;
-      el.chatbtn.style.display = c?.stream ? "inline-block" : "none";
-      el.chatbtn.title = c?.stream
-        ? "Message-level chat with per-message attribution"
-        : "";
+      capCache.set(f.pane_id, c);
+      applyChatBtn(c);
+      // Only auto-open if we hadn't already decided from cache, and the user
+      // hasn't navigated away from the terminal in the meantime.
+      if (c?.stream && preferChat && view === "terminal") openChat(f.pane_id);
 
       el.framebtn.style.display = c?.iframe ? "inline-block" : "none";
       el.framebtn.title = c?.iframe ? `Embedded view: ${c.iframe.url}` : "";
@@ -282,6 +298,7 @@ function setView(v) {
   el.framebtn.classList.toggle("on", v === "frame");
   el.fleetbtn.classList.toggle("on", v === "fleet");
   el.chatbtn.classList.toggle("on", v === "chat");
+  applyChatBtn(capability);
   if (v === "terminal") setTimeout(refit, 40);
   else renderFleet();
   renderChat();
@@ -368,7 +385,22 @@ el.frameopen.onclick = () => {
   if (capability?.iframe) window.open(capability.iframe.url, "_blank", "noopener,noreferrer");
 };
 
+/** Button visibility and label track the pane's capability and current view. */
+function applyChatBtn(c) {
+  const has = !!c?.stream;
+  el.chatbtn.style.display = has ? "inline-block" : "none";
+  if (!has) { el.chatbtn.title = ""; return; }
+  const toTerm = view === "chat";
+  el.chatbtn.textContent = toTerm ? "terminal" : "chat view";
+  el.chatbtn.title = toTerm
+    ? "Raw terminal output for this pane"
+    : "Message-level chat with per-message attribution";
+}
+
 el.chatbtn.onclick = () => {
+  // An explicit switch is a preference, not a one-off.
+  preferChat = view !== "chat";
+  LS.set("preferChat", preferChat);
   if (view === "chat") { closeChat(); setView("terminal"); }
   else if (selected && chatAvailable()) openChat(selected);
 };
