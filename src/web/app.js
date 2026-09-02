@@ -16,6 +16,7 @@ const el = {
   statusbar: $("statusbar"), whoami: $("whoami"),
   chatview: $("chatview"), msgs: $("msgs"), cin: $("cin"), cgo: $("cgo"),
   chatbtn: $("chatbtn"),
+  cclip: $("cclip"), cfile: $("cfile"), attachbar: $("attachbar"), dropveil: $("dropveil"),
   frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
   divider: $("divider"), toggleside: $("toggleside"), fleetbtn: $("fleetbtn"), triage: $("triage"),
@@ -1013,6 +1014,98 @@ function appendSys(text) {
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }
 
+/* ------------------------------------------------------------- attachments
+ * A chat that drives a terminal cannot hand an agent bytes. But every coding
+ * agent reads file paths, so an attached file is uploaded, and its PATH is what
+ * goes into the message. Paste an image, drop a file, or use the clip button.
+ * -------------------------------------------------------------------------- */
+let attached = [];               // [{path, name, size, type, preview}]
+
+function renderAttachments() {
+  el.attachbar.classList.toggle("on", attached.length > 0);
+  el.attachbar.innerHTML = attached.map((a, i) =>
+    `<span class="att">${a.preview ? `<img src="${a.preview}" alt="">` : "📄"}` +
+    `<b title="${esc(a.path)}">${esc(a.name)}</b>` +
+    `<button type="button" data-rm="${i}" title="remove">×</button></span>`).join("");
+}
+
+el.attachbar.addEventListener("click", (e) => {
+  const i = e.target?.dataset?.rm;
+  if (i === undefined) return;
+  const a = attached[Number(i)];
+  if (a?.preview) URL.revokeObjectURL(a.preview);
+  attached.splice(Number(i), 1);
+  renderAttachments();
+});
+
+async function uploadFiles(files) {
+  for (const file of files) {
+    if (!file) continue;
+    const fd = new FormData();
+    fd.append("file", file, file.name || "pasted");
+    try {
+      const r = await fetch(auth("/api/upload"), { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok || d.error) { appendSys(`attach failed: ${d.error ?? r.status}`); continue; }
+      attached.push({
+        ...d,
+        preview: file.type?.startsWith("image/") ? URL.createObjectURL(file) : null,
+      });
+      renderAttachments();
+    } catch (e) {
+      appendSys(`attach failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+}
+
+/** Attached paths ride along with the text — that is what the agent can act on. */
+function withAttachments(text) {
+  if (!attached.length) return text;
+  const paths = attached.map((a) => a.path).join("\n");
+  return text.trim() ? `${text.trim()}\n${paths}` : paths;
+}
+
+function clearAttachments() {
+  for (const a of attached) if (a.preview) URL.revokeObjectURL(a.preview);
+  attached = [];
+  renderAttachments();
+}
+
+el.cclip.onclick = () => el.cfile.click();
+el.cfile.onchange = () => { void uploadFiles([...el.cfile.files]); el.cfile.value = ""; };
+
+// Paste: an image on the clipboard has no filename, so give it one.
+el.cin.addEventListener("paste", (e) => {
+  const items = [...(e.clipboardData?.items ?? [])].filter((i) => i.kind === "file");
+  if (!items.length) return;
+  e.preventDefault();
+  const files = items.map((i) => {
+    const f = i.getAsFile();
+    if (!f) return null;
+    if (f.name && f.name !== "image.png") return f;
+    const ext = (f.type.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "");
+    return new File([f], `pasted-${Date.now()}.${ext}`, { type: f.type });
+  });
+  void uploadFiles(files.filter(Boolean));
+});
+
+// Drag and drop anywhere over the chat.
+let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes("Files");
+el.chatview.addEventListener("dragenter", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth++; el.dropveil.classList.add("on");
+});
+el.chatview.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+el.chatview.addEventListener("dragleave", () => {
+  if (--dragDepth <= 0) { dragDepth = 0; el.dropveil.classList.remove("on"); }
+});
+el.chatview.addEventListener("drop", (e) => {
+  if (!hasFiles(e)) return;
+  e.preventDefault(); dragDepth = 0; el.dropveil.classList.remove("on");
+  void uploadFiles([...(e.dataTransfer?.files ?? [])]);
+});
+
 /* --------------------------------------------------------------- tool groups
  * A turn's consecutive tool calls collapse into one bubble rather than a dozen
  * separate lines. The interesting part of a turn is usually what the agent SAID;
@@ -1305,6 +1398,67 @@ function msgBlock(author, isAgent, innerHTML) {
 }
 
 /**
+ * Minimal markdown -> HTML. Agents write markdown; showing it raw means reading
+ * literal asterisks and backticks, which is what a chat view exists to avoid.
+ *
+ * Safety: fenced code is lifted out FIRST so its contents are never transformed,
+ * then the whole string is HTML-escaped, and only then are tags introduced. No
+ * path puts unescaped source into the output.
+ */
+function mdToHtml(src) {
+  const fences = [];
+  let s = String(src).replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_m, lang, code) => {
+    fences.push({ lang, code });
+    return `\x01F${fences.length - 1}\x01`;
+  });
+  s = esc(s);
+
+  const inline = (t) => t
+    .replace(/`([^`]+)`/g, (_m, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    // Only http(s) — a markdown link must never become javascript: or data:.
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+
+  for (const raw of s.split("\n")) {
+    const line = raw.replace(/\s+$/, "");
+    if (/^\x01F\d+\x01$/.test(line.trim())) { closeList(); out.push(line.trim()); continue; }
+    if (!line.trim()) { closeList(); continue; }
+
+    let m;
+    if ((m = line.match(/^(#{1,6})\s+(.*)$/))) {
+      closeList();
+      const lv = Math.min(6, m[1].length);
+      out.push(`<h${lv}>${inline(m[2])}</h${lv}>`);
+    } else if (/^(---+|\*\*\*+|___+)$/.test(line.trim())) {
+      closeList(); out.push("<hr>");
+    } else if ((m = line.match(/^\s*&gt;\s?(.*)$/))) {
+      closeList(); out.push(`<blockquote>${inline(m[1])}</blockquote>`);
+    } else if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) {
+      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else if ((m = line.match(/^\s*\d+[.)]\s+(.*)$/))) {
+      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
+      out.push(`<li>${inline(m[1])}</li>`);
+    } else {
+      closeList(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+
+  return out.join("").replace(/\x01F(\d+)\x01/g, (_m, i) => {
+    const f = fences[Number(i)];
+    return `<pre class="code"><code>${esc(f.code.replace(/\n$/, ""))}</code></pre>`;
+  });
+}
+
+/**
  * Transient output — a tool result, a block of reasoning — renders EXPANDED
  * while it is the newest thing on screen, then collapses as soon as the next
  * frame arrives. That is how the terminal behaves: you watch it happen, and
@@ -1441,7 +1595,12 @@ function handleFrame(f) {
   const content = msg.message?.content;
 
   if (msg.type === "system") {
-    appendSys(`${msg.subtype ?? "system"}${msg.model ? ` · ${msg.model}` : ""}`);
+    // Hooks write their own bookkeeping records into the transcript. They are
+    // machinery, not conversation, and printing every one buried the messages.
+    const SHOW = new Set(["init", "compact_boundary", "error"]);
+    if (SHOW.has(msg.subtype)) {
+      appendSys(`${msg.subtype}${msg.model ? ` · ${msg.model}` : ""}`);
+    }
     return;
   }
   const isReplay = renderingHistory || (typeof f.seq === "number" && f.seq <= replayThrough);
@@ -1454,13 +1613,13 @@ function handleFrame(f) {
     // hierarchy is the point — a flat list loses which output came from where.
     if (c.type === "text" && c.text?.trim()) {
       endToolGroup(!renderingHistory);
-      const t = esc(c.text);
+      const t = `<div class="md">${mdToHtml(c.text)}</div>`;
       msgBlock(f.author, isAgent,
         `<div class="line"><span class="glyph dot">●</span>` +
-        (c.text.length > 1400 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
+        (c.text.length > 2600 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
     } else if (c.type === "thinking" && c.thinking?.trim()) {
       endToolGroup(!renderingHistory);
-      const t = esc(c.thinking);
+      const t = `<div class="md">${mdToHtml(c.thinking)}</div>`;
       msgBlock(f.author, true,
         `<div class="line"><span class="glyph spark">✳</span>` +
         clamped(t, "think", true) + `</div>`);
@@ -1561,8 +1720,10 @@ el.cin.onkeydown = (e) => {
   e.stopPropagation();
 };
 function sendChatMsg() {
-  const text = el.cin.value;
+  // An attachment alone is a valid message — the paths are the content.
+  const text = withAttachments(el.cin.value);
   if (!text.trim() || streamSock?.readyState !== 1) return;
   streamSock.send(JSON.stringify({ type: "say", text }));
   el.cin.value = "";
+  clearAttachments();
 }
