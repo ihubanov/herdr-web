@@ -200,7 +200,12 @@ const server = createServer((sock) => {
                 memory_id:`db74213c-a57b-4775-9f40-e6d3b5ff90${i}`, domain:"session-lifecycle",
                 status:"committed", confidence:0.847, content:"Session ended (other). Direct-write SessionEnd hook recording the lifecycle event; per-turn content is captured by the agent's own calls." })) }) }] } }), 800);
           setTimeout(() => publish({ type: "assistant", message: { role: "assistant",
+            usage: { input_tokens: 4120, output_tokens: 1840 },
             content: [{ type: "text", text: "The working dir resolved to /home/user/project — a git repo on main, clean, with recent commits. What would you like to do?" }] } }), 1100);
+          // A `result` frame closes the turn. Clients use it to stop the live
+          // status ticker and record what the turn cost.
+          setTimeout(() => publish({ type: "result", subtype: "success",
+            duration_ms: 1400, usage: { input_tokens: 4120, output_tokens: 5730 } }), 1400);
           continue;
         }
         if (cmd[0] === "/question" || cmd[0] === "/both") {
@@ -230,7 +235,10 @@ const server = createServer((sock) => {
         setTimeout(() => publish({ type: "user", message: { role: "user",
           content: [{ type: "tool_result", tool_use_id: "t1", content: "mock\n" }] } }), 950);
         setTimeout(() => publish({ type: "assistant", message: { role: "assistant",
+          usage: { input_tokens: 980, output_tokens: 260 },
           content: [{ type: "text", text: `Done, ${author}. (mock reply to "${text.slice(0,40)}")` }] } }), 1300);
+        setTimeout(() => publish({ type: "result", subtype: "success",
+          duration_ms: 1600, usage: { input_tokens: 980, output_tokens: 260 } }), 1600);
       }
     }
   });
