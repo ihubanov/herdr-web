@@ -220,8 +220,12 @@
   .out{color:var(--dim);white-space:pre-wrap;word-break:break-word}
   .out.err{color:#e0a0a0}
 
-  /* Long output is clamped rather than allowed to bury the conversation. */
-  .clamp{max-height:11em;overflow:hidden;position:relative;cursor:pointer}
+  /* Transient output is expanded while live, then collapses behind a fade.
+     The transition is what makes it read as "finished" rather than as a jump. */
+  .clamp{max-height:11em;overflow:hidden;position:relative;cursor:pointer;
+    transition:max-height .18s ease}
+  .clamp.live{cursor:default}
+  .clamp:not(.open):hover::after{background:linear-gradient(transparent,var(--card))}
   .clamp::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.6em;
     background:linear-gradient(transparent,var(--termbg))}
   .clamp.open{max-height:none;cursor:default}
