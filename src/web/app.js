@@ -936,6 +936,7 @@ function chatAvailable() { return !!capability?.stream; }
 function openChat(paneId) {
   closeChat();
   streamPane = paneId;
+  lastSpeaker = null;
   el.msgs.innerHTML = `<div class="sys">connecting to the agent stream…</div>`;
   setView("chat");
 
@@ -966,24 +967,78 @@ function appendSys(text) {
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }
 
-function avatarFor(author, isAgent) {
-  if (isAgent) return `<span class="av">${esc(me?.agentName || "agent")}<span class="ai">(AI)</span></span>`;
-  return `<span class="av">${esc(author || "user")}</span>`;
+let lastSpeaker = null;          // suppress a repeated badge on the same speaker
+
+function speakerOf(author, isAgent) {
+  return isAgent ? `agent:${me?.agentName || "agent"}` : `user:${author || "user"}`;
 }
 
+function avatarHTML(author, isAgent, repeat) {
+  const label = isAgent ? `${esc(me?.agentName || "agent")}(AI)` : esc(author || "user");
+  return `<span class="av${repeat ? " blank" : ""}">${label}</span>`;
+}
+
+/**
+ * One rendered line. The badge is drawn only when the speaker changes — an
+ * agent turn is often a dozen frames (thinking, tool call, result, text) and
+ * stamping every one of them was the main source of noise.
+ */
 function msgBlock(author, isAgent, innerHTML) {
+  const who = speakerOf(author, isAgent);
+  const repeat = who === lastSpeaker;
+  lastSpeaker = who;
   const mine = !isAgent && author === me?.label;
   const d = document.createElement("div");
-  d.className = `msg ${isAgent ? "agent" : "user"}${mine ? " me" : ""}`;
-  d.innerHTML = `${avatarFor(author, isAgent)}<div class="body">${innerHTML}</div>`;
+  d.className = `msg ${isAgent ? "agent" : "user"}${mine ? " me" : ""}${repeat ? "" : " turn"}`;
+  d.innerHTML = `${avatarHTML(author, isAgent, repeat)}<div class="body">${innerHTML}</div>`;
   el.msgs.appendChild(d);
   scrollMsgs();
   return d;
 }
 
-/** One stream-json SDKMessage -> rendered blocks. */
+/** Long output is clamped; clicking expands it. */
+function clamped(html, cls) {
+  const id = `c${Math.random().toString(36).slice(2, 8)}`;
+  return `<div class="${cls} clamp" data-clamp="${id}">${html}</div>`;
+}
+el.msgs.addEventListener("click", (e) => {
+  const c = e.target.closest(".clamp");
+  if (c && !c.classList.contains("open")) c.classList.add("open");
+});
+
+/**
+ * The interesting part of a tool call is the command, not the envelope.
+ * `Bash({"command":"ls -la","description":"..."})` is how the frame arrives;
+ * `Bash ls -la` is what a person reading a terminal wants to see.
+ */
+const TOOL_ARG = {
+  Bash: (i) => i.command,
+  Read: (i) => i.file_path,
+  Write: (i) => i.file_path,
+  Edit: (i) => i.file_path,
+  Glob: (i) => i.pattern,
+  Grep: (i) => [i.pattern, i.path].filter(Boolean).join("  "),
+  WebFetch: (i) => i.url,
+  Task: (i) => i.description,
+};
+function toolLine(name, input) {
+  const inp = (input && typeof input === "object") ? input : {};
+  const pick = TOOL_ARG[name];
+  let arg = pick ? pick(inp) : undefined;
+  if (arg === undefined) {
+    // Unknown tool: show its fields compactly rather than a JSON blob.
+    const parts = Object.entries(inp)
+      .filter(([k]) => k !== "description")
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
+    arg = parts.join("  ");
+  }
+  return `<span class="name">${esc(name)}</span>${arg ? " " + esc(String(arg)) : ""}`;
+}
+
+/** One stream-json SDKMessage -> rendered lines. */
 function handleFrame(f) {
   if (f.type === "ready") {
+    lastSpeaker = null;
     el.msgs.innerHTML = "";
     appendSys(`connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
     return;
@@ -991,12 +1046,11 @@ function handleFrame(f) {
   if (f.type === "_nostream") { appendSys("this agent does not expose a structured stream"); return; }
   if (f.type === "_closed")   { appendSys(`stream closed: ${f.reason ?? ""}`); return; }
   if (f.type === "participants") return;
+  if (f.type === "error") { appendSys(`agent refused: ${f.code ?? "error"} ${f.message ?? ""}`); return; }
 
   if (f.type === "permission_request") { renderPermission(f); return; }
   if (f.type === "question_request")   { renderQuestion(f); return; }
-  if (f.type === "permission_resolved" || f.type === "question_resolved") {
-    resolveHitl(f); return;
-  }
+  if (f.type === "permission_resolved" || f.type === "question_resolved") { resolveHitl(f); return; }
 
   if (f.type !== "frame") return;
   const msg = f.msg ?? {};
@@ -1011,17 +1065,31 @@ function handleFrame(f) {
   if (!Array.isArray(content)) return;
 
   for (const c of content) {
+    // Glyphs and nesting follow the agent's own terminal rendering: a bullet
+    // opens a turn, and ⎿ attaches a result to the call that produced it. The
+    // hierarchy is the point — a flat list loses which output came from where.
     if (c.type === "text" && c.text?.trim()) {
-      msgBlock(f.author, isAgent, `<div class="txt">${esc(c.text)}</div>`);
+      const t = esc(c.text);
+      msgBlock(f.author, isAgent,
+        `<div class="line"><span class="glyph dot">●</span>` +
+        (c.text.length > 1400 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
     } else if (c.type === "thinking" && c.thinking?.trim()) {
-      msgBlock(f.author, true, `<div class="think">${esc(c.thinking)}</div>`);
+      const t = esc(c.thinking);
+      msgBlock(f.author, true,
+        `<div class="line"><span class="glyph spark">✳</span>` +
+        (c.thinking.length > 700 ? clamped(t, "think") : `<div class="think">${t}</div>`) + `</div>`);
     } else if (c.type === "tool_use") {
       msgBlock(f.author, true,
-        `<div class="tool"><span class="name">${esc(c.name)}</span>(${esc(
-          typeof c.input === "string" ? c.input : JSON.stringify(c.input ?? {}))})</div>`);
+        `<div class="line"><span class="glyph dot">●</span>` +
+        `<div class="tool">${toolLine(c.name, c.input)}</div></div>`);
     } else if (c.type === "tool_result") {
       const body = typeof c.content === "string" ? c.content : JSON.stringify(c.content ?? "");
-      msgBlock(f.author, true, `<div class="tool result">${esc(body)}</div>`);
+      const err = /^(exit code [1-9]|fatal:|error|traceback)/i.test(body.trim());
+      const t = esc(body.trim());
+      msgBlock(f.author, true,
+        `<div class="line nested"><span class="glyph hook">⎿</span>` +
+        (body.length > 600 ? clamped(t, `out${err ? " err" : ""}`)
+                           : `<div class="out${err ? " err" : ""}">${t}</div>`) + `</div>`);
     }
   }
 }

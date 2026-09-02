@@ -180,42 +180,71 @@
   #framebar button:hover{border-color:var(--blocked);color:var(--blocked)}
   #frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
 
-  /* ---------- structured chat view ---------- */
-  #chatview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
+  /* ---------- structured chat view ----------
+     Styled to sit next to the terminal, not to look like a chat app: monospace,
+     tight leading, no rounded cards. A speaker badge appears only when the
+     speaker CHANGES — repeating it on every tool call was the main source of
+     visual noise. */
+  #chatview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--termbg)}
   #chatview.on{display:flex}
-  #msgs{flex:1;min-height:0;overflow-y:auto;padding:14px 16px;display:flex;
-    flex-direction:column;gap:12px}
-  .msg{display:flex;gap:10px;align-items:flex-start;max-width:1000px}
-  .msg .av{flex:none;border-radius:999px;padding:2px 9px;font:600 11px/1.5 ui-monospace,monospace;
-    white-space:nowrap;margin-top:1px}
-  .msg.user .av{background:#16202e;border:1px solid #2b3a4f;color:var(--idle)}
-  .msg.user.me .av{background:#132a1c;border:1px solid #2c5c3a;color:var(--working)}
-  .msg.agent .av{background:#2a1f10;border:1px solid #5c4a1c;color:var(--blocked)}
-  .msg .body{min-width:0;flex:1}
-  .msg .txt{white-space:pre-wrap;word-break:break-word;font-size:13.5px;line-height:1.55}
+  #msgs{flex:1;min-height:0;overflow-y:auto;padding:8px 0 12px;
+    font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  .msg{display:grid;grid-template-columns:104px 1fr;gap:10px;padding:1px 14px}
+  .msg.turn{margin-top:10px}
+  .msg .av{grid-column:1;justify-self:end;font-size:10.5px;font-weight:700;
+    white-space:nowrap;padding-top:1px;opacity:.95}
+  .msg .av.blank{visibility:hidden}
+  .msg.user .av{color:var(--idle)}
+  .msg.user.me .av{color:var(--working)}
+  .msg.agent .av{color:var(--blocked)}
+  .msg .body{grid-column:2;min-width:0}
+
+  /* A turn is a glyph plus its content; a result nests under the call above it. */
+  .line{display:grid;grid-template-columns:1.4em 1fr;gap:2px;align-items:start}
+  .line.nested{padding-left:1.6em}
+  .glyph{grid-column:1;user-select:none;opacity:.85}
+  .glyph.dot{color:var(--fg)}
+  .glyph.spark{color:var(--faint)}
+  .glyph.hook{color:var(--faint)}
+  .line > :not(.glyph){grid-column:2;min-width:0}
+
+  .txt{white-space:pre-wrap;word-break:break-word;color:#dbe4ee}
   .msg.user .txt{color:var(--fg)}
-  .msg.agent .txt{color:#dbe4ee}
-  .think{font-style:italic;color:var(--faint);font-size:12.5px;
-    border-left:2px solid var(--line);padding-left:9px;white-space:pre-wrap}
-  .tool{background:#0d1117;border:1px solid var(--line);border-radius:7px;padding:7px 10px;
-    font:11.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#9fb4cc;
-    white-space:pre-wrap;word-break:break-word;overflow-x:auto}
+  .think{color:var(--faint);font-style:italic;white-space:pre-wrap}
+
+  /* A tool call reads as the command it is, not as the JSON that carried it. */
+  .tool{color:#9fb4cc;white-space:pre-wrap;word-break:break-word}
   .tool .name{color:var(--blocked);font-weight:700}
-  .tool.result{color:var(--dim);max-height:220px;overflow:auto}
-  .sys{color:var(--faint);font-size:11.5px;font-style:italic}
-  #composer{display:flex;gap:8px;padding:10px 14px;border-top:1px solid var(--line);
+  .tool .arg{color:#c9d3de}
+  .out{color:var(--dim);white-space:pre-wrap;word-break:break-word}
+  .out.err{color:#e0a0a0}
+
+  /* Long output is clamped rather than allowed to bury the conversation. */
+  .clamp{max-height:11em;overflow:hidden;position:relative;cursor:pointer}
+  .clamp::after{content:"";position:absolute;left:0;right:0;bottom:0;height:2.6em;
+    background:linear-gradient(transparent,var(--termbg))}
+  .clamp.open{max-height:none;cursor:default}
+  .clamp.open::after{display:none}
+  .more{color:var(--idle);font-size:11px;cursor:pointer;padding-left:9px}
+
+  .sys{color:var(--faint);font-size:11.5px;padding:2px 14px 2px 118px}
+
+  #composer{display:flex;gap:8px;padding:8px 14px;border-top:1px solid var(--line);
     background:var(--panel);flex:none}
   #cin{flex:1;background:var(--card);border:1px solid var(--line);color:var(--fg);
-    border-radius:8px;padding:9px 12px;font:inherit;font-size:13.5px}
+    border-radius:7px;padding:8px 11px;font:inherit;font-size:13px}
   #cin:focus{outline:none;border-color:var(--idle)}
-  #cgo{background:var(--idle);border:0;color:#06121f;font-weight:700;border-radius:8px;
-    padding:9px 18px;font:inherit;font-size:13px;cursor:pointer}
+  #cgo{background:var(--idle);border:0;color:#06121f;font-weight:700;border-radius:7px;
+    padding:8px 16px;font:inherit;font-size:12.5px;cursor:pointer}
   #cgo:disabled{opacity:.5;cursor:default}
-  .hitl{border:1px solid #5c3a1c;background:var(--blocked-bg);border-radius:9px;padding:11px 13px}
-  .hitl h4{margin:0 0 7px;font-size:12.5px;color:var(--blocked)}
-  .hitl .opts{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
-  .hitl.done{opacity:.55;border-color:var(--line);background:transparent}
-  .hitl .verdict{font-size:11.5px;color:var(--faint);margin-top:7px}
+
+  .hitl{border-left:2px solid var(--blocked);background:var(--blocked-bg);
+    padding:8px 11px;margin:3px 0}
+  .hitl h4{margin:0 0 6px;font-size:12px;color:var(--blocked)}
+  .hitl .opts{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .hitl.done{opacity:.55;border-left-color:var(--line);background:transparent}
+  .hitl .verdict{font-size:11px;color:var(--faint);margin-top:6px}
 
   /* ---------- fleet overlay view ---------- */
   #fleet{position:absolute;inset:0;background:var(--bg);overflow-y:auto;padding:14px;display:none}
