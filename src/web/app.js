@@ -1013,6 +1013,66 @@ function appendSys(text) {
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }
 
+/* --------------------------------------------------------------- tool groups
+ * A turn's consecutive tool calls collapse into one bubble rather than a dozen
+ * separate lines. The interesting part of a turn is usually what the agent SAID;
+ * the tools it ran to get there are detail you want available, not resident.
+ *
+ * Prose or reasoning ends the run — the agent moved on to something else, so a
+ * later tool call starts a fresh bubble instead of joining an unrelated one.
+ * -------------------------------------------------------------------------- */
+let toolGroup = null;
+
+function groupLabel(root) {
+  const n = Number(root.dataset.count || 0);
+  const names = (root.dataset.names || "").split(",").filter(Boolean);
+  const shown = names.slice(0, 3).join(", ");
+  const rest = names.length > 3 ? ` +${names.length - 3}` : "";
+  const open = root.classList.contains("open");
+  return `${open ? "▾" : "▸"} ${n} tool${n === 1 ? "" : "s"}${shown ? ` · ${shown}${rest}` : ""}`;
+}
+
+function setGroupOpen(root, open) {
+  root.classList.toggle("open", open);
+  const h = root.querySelector(".tghdr");
+  if (h) h.textContent = groupLabel(root);
+}
+
+/** End the current run. `collapse` folds it away; leaving it open is for replay. */
+function endToolGroup(collapse) {
+  if (!toolGroup) return;
+  if (collapse) setGroupOpen(toolGroup.root, false);
+  toolGroup = null;
+}
+
+function appendTool(author, innerHTML, name, live) {
+  if (!toolGroup) {
+    const shell = msgBlock(author, true, "");
+    const root = document.createElement("div");
+    // Live runs open so you can watch them; replayed and paged-in history
+    // arrives folded — a transcript is for reading, and a wall of expanded
+    // tool output is the thing this bubble exists to prevent.
+    root.className = `toolgroup${live ? " open" : ""}`;
+    root.dataset.count = "0";
+    root.dataset.names = "";
+    root.innerHTML = `<button class="tghdr" type="button"></button><div class="tgbody"></div>`;
+    shell.querySelector(".body").appendChild(root);
+    toolGroup = { root, body: root.querySelector(".tgbody") };
+  }
+  const { root, body } = toolGroup;
+  const holder = document.createElement("div");
+  holder.innerHTML = innerHTML;
+  while (holder.firstChild) body.appendChild(holder.firstChild);
+  if (name) {
+    const names = (root.dataset.names || "").split(",").filter(Boolean);
+    if (!names.includes(name)) { names.push(name); root.dataset.names = names.join(","); }
+    root.dataset.count = String(Number(root.dataset.count || 0) + 1);
+  }
+  setGroupOpen(root, root.classList.contains("open"));
+  markOverflow(root);
+  scrollMsgs();
+}
+
 /* ------------------------------------------------------------------ history
  * The stream opens on the tail of the transcript; older turns are paged in on
  * demand. Frames are rendered into a detached node first, then inserted above
@@ -1154,6 +1214,7 @@ function turnTick() {
 
 /** Fold the ticking line into a static record of what the turn cost. */
 function turnEnd(usage, durationMs) {
+  endToolGroup(true);
   if (!turn) return;
   clearInterval(turn.timer);
   const out = Math.max(turn.out, usage?.output_tokens ?? 0);
@@ -1289,6 +1350,12 @@ function collapseLive() {
   }
 }
 el.msgs.addEventListener("click", (e) => {
+  const hdr = e.target.closest(".tghdr");
+  if (hdr) {
+    const root = hdr.closest(".toolgroup");
+    if (root) { setGroupOpen(root, !root.classList.contains("open")); markOverflow(root); }
+    return;
+  }
   const wrap = e.target.closest(".clampwrap");
   if (!wrap) return;
   // The block itself scrolls and can be selected, so only the toggle flips it.
@@ -1338,6 +1405,7 @@ function handleFrame(f) {
     // `ready.seq` is a high-water mark: everything up to it is backlog.
     replayThrough = typeof f.seq === "number" ? f.seq : -1;
     if (turn) { clearInterval(turn.timer); turn = null; }
+    toolGroup = null;
     el.msgs.innerHTML = "";
     historyFrom = Number(f.historyFrom ?? 0) || 0;
     if (historyFrom > 0) el.msgs.appendChild(makeLoadMore());
@@ -1352,6 +1420,7 @@ function handleFrame(f) {
   // A completed turn is "done" even if no further frame follows it.
   if (f.type === "frame" && f.msg?.type === "result") {
     collapseLive();
+    endToolGroup(true);
     turnEnd(f.msg.usage, f.msg.duration_ms);
     return;
   }
@@ -1384,26 +1453,28 @@ function handleFrame(f) {
     // opens a turn, and ⎿ attaches a result to the call that produced it. The
     // hierarchy is the point — a flat list loses which output came from where.
     if (c.type === "text" && c.text?.trim()) {
+      endToolGroup(!renderingHistory);
       const t = esc(c.text);
       msgBlock(f.author, isAgent,
         `<div class="line"><span class="glyph dot">●</span>` +
         (c.text.length > 1400 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
     } else if (c.type === "thinking" && c.thinking?.trim()) {
+      endToolGroup(!renderingHistory);
       const t = esc(c.thinking);
       msgBlock(f.author, true,
         `<div class="line"><span class="glyph spark">✳</span>` +
         clamped(t, "think", true) + `</div>`);
     } else if (c.type === "tool_use") {
-      msgBlock(f.author, true,
+      appendTool(f.author,
         `<div class="line"><span class="glyph dot">●</span>` +
-        `<div class="tool">${toolLine(c.name, c.input)}</div></div>`);
+        `<div class="tool">${toolLine(c.name, c.input)}</div></div>`, c.name || "tool", !isReplay);
     } else if (c.type === "tool_result") {
       const body = typeof c.content === "string" ? c.content : JSON.stringify(c.content ?? "");
       const err = /^(exit code [1-9]|fatal:|error|traceback)/i.test(body.trim());
       const t = esc(body.trim());
-      msgBlock(f.author, true,
+      appendTool(f.author,
         `<div class="line nested"><span class="glyph hook">⎿</span>` +
-        clamped(t, `out${err ? " err" : ""}`, true) + `</div>`);
+        clamped(t, `out${err ? " err" : ""}`, !isReplay) + `</div>`, null, !isReplay);
     }
   }
 }

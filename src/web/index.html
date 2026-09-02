@@ -238,6 +238,17 @@
      be read without expanding it and shoving the rest of the log off screen.
      The fade and the toggle live on the wrapper, not the scroller — inside they
      would scroll away with the content. */
+  /* A run of tool calls, as one collapsible bubble. */
+  .toolgroup{border:1px solid var(--line);border-radius:6px;margin:2px 0 3px;
+    background:rgba(255,255,255,.018);overflow:hidden}
+  .tghdr{display:block;width:100%;text-align:left;font:inherit;font-size:11px;
+    letter-spacing:.02em;padding:3px 8px;cursor:pointer;color:var(--dim);
+    background:transparent;border:0}
+  .tghdr:hover{color:var(--fg);background:rgba(255,255,255,.03)}
+  .toolgroup:not(.open) .tgbody{display:none}
+  .tgbody{padding:1px 8px 5px}
+  .tgbody .line{padding-right:2px}
+
   .loadmore{display:flex;justify-content:center;padding:6px 0 8px}
   .loadmore button{font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;
     color:var(--dim);background:var(--card);border:1px solid var(--line);border-radius:3px}
