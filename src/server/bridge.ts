@@ -279,19 +279,6 @@ const server = Bun.serve<WsData>({
 
     // --- JSON API -----------------------------------------------------------
     if (url.pathname.startsWith("/api/")) {
-      // ONE unauthenticated probe, deliberately minimal: is anyone viewing this
-      // pane in herdr-web? A tool running in a pane needs this to know whether a
-      // window it opens on the physical desktop is visible to the person
-      // watching — and making it read the admin token to find out would be a far
-      // worse trade. It answers a single boolean about a pane the caller already
-      // names, and discloses no viewer names, no other panes, and nothing about
-      // what any of them contain.
-      if (url.pathname === "/api/viewing") {
-        const paneId = url.searchParams.get("pane_id");
-        if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
-        return Response.json({ pane_id: paneId, viewing: (presence.get(paneId)?.size ?? 0) > 0 });
-      }
-
       if (!authed(req)) return Response.json({ error: "unauthorized" }, { status: 401 });
 
       if (url.pathname === "/api/health") {
