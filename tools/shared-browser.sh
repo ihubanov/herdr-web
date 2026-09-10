@@ -54,10 +54,15 @@ for _ in $(seq 20); do DISPLAY=":${DISPLAY_N}" xdpyinfo >/dev/null 2>&1 && break
 # what lets it attach to :N on a Wayland desktop.
 # -listen 127.0.0.1 is NOT optional: x11vnc binds every interface by default,
 # which would put a live desktop with input enabled on the network. -no6 is
-# needed as well — -listen only constrains IPv4, and x11vnc otherwise still
-# binds the IPv6 wildcard [::].
+# needed as well — -listen only constrains IPv4. And -no6 is STILL not enough:
+# -rfbport sets the IPv4 port ONLY, so the IPv6 listener falls back to its
+# default 5900 and comes up on [::] regardless. Observed live: a -nopw desktop
+# on every IPv6 interface while the intended port was loopback-clean. Hence
+# -rfbportv6 -1 to disable that listener outright, plus -localhost. Verify with
+# `ss -ltn | grep -E ':5900|\[::\]'` after any change to this line.
 env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
-  x11vnc -display ":${DISPLAY_N}" -rfbport "$VNC_PORT" -listen 127.0.0.1 -no6 \
+  x11vnc -display ":${DISPLAY_N}" -rfbport "$VNC_PORT" \
+    -listen 127.0.0.1 -localhost -no6 -rfbportv6 -1 \
   -nopw -forever -shared -bg -quiet >/dev/null 2>&1
 
 # Same for websockify: a bare port means 0.0.0.0.
@@ -69,8 +74,15 @@ URL="http://127.0.0.1:${WS_PORT}/vnc.html?autoconnect=1&resize=scale"
 if [ "$LAUNCH_BROWSER" = 1 ]; then
   for b in chromium google-chrome chromium-browser firefox; do
     if command -v "$b" >/dev/null; then
+      # A DEDICATED profile is required, not a nicety. Started on the default
+      # profile while the user already has that browser open, Chrome hands the
+      # URL to the running instance and exits — so nothing appears on :N at all,
+      # and the user's own session gets a surprise tab. A separate user-data-dir
+      # makes this a genuinely separate browser on the virtual display.
       env -u WAYLAND_DISPLAY DISPLAY=":${DISPLAY_N}" "$b" \
-        --no-first-run --remote-debugging-port=$((9300 + DISPLAY_N)) \
+        --user-data-dir="${XDG_RUNTIME_DIR:-/tmp}/shared-browser-${DISPLAY_N}" \
+        --no-first-run --no-default-browser-check \
+        --remote-debugging-port=$((9300 + DISPLAY_N)) \
         about:blank >/dev/null 2>&1 &
       echo "browser: $b on :${DISPLAY_N} (CDP $((9300 + DISPLAY_N)))"
       break
