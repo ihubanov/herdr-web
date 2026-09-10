@@ -22,8 +22,15 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HERDR="${HERDR_BIN_PATH:-$(command -v herdr || echo herdr)}"
-WEB="${HERDR_WEB_URL:-http://127.0.0.1:7878}"
-TOKEN="${HERDR_WEB_TOKEN:-}"
+# herdr-web's own plugin config is the authority for port and token. Reading it
+# here is fair — this script IS herdr-web — and without the token the capability
+# read-back 401s, which the old code reported as "refused" even though the
+# advertisement had gone through. A false refusal is worse than no check.
+ENVF="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/herdr-web}/env"
+_cfg() { [ -f "$ENVF" ] || return 0; grep -E "^$1=" "$ENVF" 2>/dev/null | cut -d= -f2- | tr -d '"'"'"' '; }
+WEB="${HERDR_WEB_URL:-http://127.0.0.1:$(_cfg HERDR_WEB_PORT || echo 7878)}"
+WEB="${WEB%/}"
+TOKEN="${HERDR_WEB_TOKEN:-$(_cfg HERDR_WEB_TOKEN)}"
 PANE="${HERDR_PANE_ID:-}"
 TTL=300000
 
@@ -31,7 +38,12 @@ die() { echo "herdr-share: $*" >&2; exit 1; }
 [ -n "$PANE" ] || die "no HERDR_PANE_ID — run this inside a herdr pane."
 
 cap() {
-  curl -sS -m 5 "${WEB}/api/capability?pane_id=${PANE}${TOKEN:+&token=$TOKEN}" 2>/dev/null || echo '{}'
+  local body code
+  body="$(curl -sS -m 5 -w '\n%{http_code}' \
+    "${WEB}/api/capability?pane_id=${PANE}${TOKEN:+&token=$TOKEN}" 2>/dev/null)" || { echo '{}'; return; }
+  code="${body##*$'\n'}"; body="${body%$'\n'*}"
+  if [ "$code" = "401" ]; then echo '{"_unverified":true}'; return; fi
+  [ -n "$body" ] && echo "$body" || echo '{}'
 }
 
 # Advertise, then read back what herdr-web made of it. Reporting the refusal is
@@ -61,6 +73,13 @@ elif pol == "off":
     print("REFUSED: embedded views are disabled (HERDR_WEB_IFRAMES=off).", file=sys.stderr)
 elif pol == "loopback" and not any(h in url for h in ("127.0.0.1", "localhost", "[::1]")):
     print(f"REFUSED: policy is 'loopback' and {url} is not a loopback URL.", file=sys.stderr)
+elif d.get("_unverified"):
+    # The token was missing or wrong. The advertisement itself already went in;
+    # only the read-back failed, so do not call this a refusal.
+    print(f"advertised: {url}", file=sys.stderr)
+    print("could not confirm it (herdr-web needs a token to read capability). "
+          "Check the embedded-view button in herdr-web.", file=sys.stderr)
+    sys.exit(0)
 else:
     print("REFUSED: herdr-web did not accept it and gave no reason "
           "(is the bridge running?).", file=sys.stderr)
