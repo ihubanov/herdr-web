@@ -182,6 +182,23 @@ never appear in the embedded view. That is the usual reason nothing happens.
 The command reports refusals rather than failing silently — a non-loopback URL
 under the default policy exits non-zero saying so.
 
+### Is anyone watching? `GET /api/viewing?pane_id=<id>`
+
+```json
+{"pane_id": "w3:p4", "viewing": true}
+```
+
+The one unauthenticated endpoint. A tool running in a pane needs to know whether
+a window it opens on the physical desktop is visible to the person watching, and
+making it read an admin token to find that out would be a far worse trade. It
+answers a single boolean about a pane the caller already names — no viewer
+names, no other panes, nothing about their contents.
+
+Treat a connection failure as *unknown*, never as "nobody is watching": failing
+the other way hides the warning exactly when the bridge is down. And note it
+means *someone is attached in herdr-web*, not *the user cannot see the desktop* —
+they may be sitting at the machine with both in front of them.
+
 An agent can advertise a URL as an `iframe_url` pane token — the same discovery
 path as the agent stream — and herdr-web will show it as a view.
 
