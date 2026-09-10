@@ -1,0 +1,143 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>shared display</title>
+<style>
+  html,body{margin:0;height:100%;background:#12151c;color:#c8ccd4;
+    font:13px system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+  #screen{position:absolute;inset:0}
+  /* A held-elsewhere display must LOOK inert, or the user drags at it and
+     wonders why nothing happens. The banner says who has it and why. */
+  #veil{position:absolute;inset:0;z-index:5;display:none;pointer-events:none;
+    background:rgba(10,12,18,.35)}
+  #veil.on{display:block}
+  #tag{position:absolute;left:0;right:0;top:0;z-index:6;padding:5px 10px;
+    background:rgba(10,12,18,.86);border-bottom:1px solid #2a2f3a;
+    font-size:12px;letter-spacing:.02em;display:none}
+  #tag.on{display:block}
+  #tag b{color:#e0af68;font-weight:600}
+  #err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
+    padding:20px;text-align:center;color:#f7768e}
+  #err.on{display:flex}
+</style>
+<div id="screen"></div>
+<div id="veil"></div>
+<div id="tag"></div>
+<div id="err"></div>
+
+<script type="module">
+import RFB from './core/rfb.js';
+
+const qs = new URLSearchParams(location.search);
+const host = location.hostname;
+const port = location.port || (location.protocol === 'https:' ? 443 : 80);
+const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+const path = qs.get('path') || 'websockify';
+
+const screenEl = document.getElementById('screen');
+const veil = document.getElementById('veil');
+const tag = document.getElementById('tag');
+const errEl = document.getElementById('err');
+
+let rfb = null;
+// Start LOCKED. If the parent never speaks — an old herdr-web, a direct visit —
+// the safe default is a display you can watch but not disturb, because the
+// agent may well be mid-action on it.
+let iHaveInput = false;
+
+function paint() {
+  if (rfb) rfb.viewOnly = !iHaveInput;
+  veil.classList.toggle('on', !iHaveInput);
+  tag.classList.toggle('on', !iHaveInput);
+}
+
+function setLock(state) {
+  const mine = state && state.owner === 'user';
+  iHaveInput = !!mine;
+  if (!mine) {
+    const who = state && state.owner === 'agent'
+      ? `<b>the agent</b> is driving`
+      : `input is <b>not claimed</b>`;
+    tag.innerHTML = `${who} — you are watching. Take input from the herdr-web toolbar to interact.`;
+  }
+  paint();
+}
+
+try {
+  rfb = new RFB(screenEl, `${proto}://${host}:${port}/${path}`, {});
+  rfb.scaleViewport = qs.get('resize') !== 'off';
+  rfb.clipViewport = false;
+  rfb.viewOnly = true;                 // until told otherwise
+  rfb.addEventListener('disconnect', (e) => {
+    errEl.textContent = `disconnected${e.detail && e.detail.clean ? '' : ' unexpectedly'}`;
+    errEl.classList.add('on');
+  });
+  rfb.addEventListener('connect', () => { errEl.classList.remove('on'); paint(); });
+} catch (e) {
+  errEl.textContent = `could not start the VNC client: ${e && e.message ? e.message : e}`;
+  errEl.classList.add('on');
+}
+
+/* ---------------------------------------------------------------- clipboard
+ * Clipboard is INPUT, so it follows the same lock as the keyboard: a viewer
+ * cannot paste into a display someone else is driving.
+ *
+ * Paste uses the DOM paste event rather than navigator.clipboard.readText():
+ * the event carries the data with it, so it needs no clipboard-read permission
+ * and works on a plain Ctrl+V. Copy the other way is best-effort — writeText
+ * needs permission and focus, and an iframe often has neither, so we keep the
+ * last remote selection and expose it on a click instead of pretending.
+ */
+let lastRemoteClip = '';
+
+document.addEventListener('paste', (ev) => {
+  if (!rfb || !iHaveInput) return;
+  const text = ev.clipboardData && ev.clipboardData.getData('text/plain');
+  if (!text) return;
+  ev.preventDefault();
+  try { rfb.clipboardPasteFrom(text); } catch { /* client not connected yet */ }
+});
+
+if (rfb) {
+  rfb.addEventListener('clipboard', (e) => {
+    lastRemoteClip = (e.detail && e.detail.text) || '';
+    if (!lastRemoteClip) return;
+    // Try the quiet path; if the document is not focused or permission is
+    // absent this rejects, and the copy button below is the fallback.
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(lastRemoteClip).catch(() => showClipOffer());
+    } else showClipOffer();
+  });
+}
+
+function showClipOffer() {
+  let b = document.getElementById('clipbtn');
+  if (!b) {
+    b = document.createElement('button');
+    b.id = 'clipbtn';
+    b.style.cssText = 'position:absolute;right:8px;bottom:8px;z-index:7;font:inherit;' +
+      'font-size:11px;padding:4px 8px;border-radius:4px;cursor:pointer;' +
+      'background:#1b1f28;color:#c8ccd4;border:1px solid #2a2f3a';
+    b.onclick = () => {
+      navigator.clipboard.writeText(lastRemoteClip)
+        .then(() => { b.textContent = 'copied'; setTimeout(() => b.remove(), 1200); })
+        .catch(() => { b.textContent = 'copy blocked'; });
+    };
+    document.body.appendChild(b);
+  }
+  b.textContent = 'copy from remote';
+}
+
+// The parent owns the lock decision; this page only enforces it. postMessage
+// rather than polling the API: the iframe is a different origin, and a shim
+// that had to authenticate to herdr-web would need a token in its URL.
+window.addEventListener('message', (ev) => {
+  const d = ev.data;
+  if (!d || d.kind !== 'herdr-input-lock') return;
+  setLock(d.state);
+});
+
+// Announce readiness so the parent sends the current state without waiting for
+// its next poll — otherwise a reload sits inert for a full interval.
+try { parent.postMessage({ kind: 'herdr-shim-ready' }, '*'); } catch { /* no parent */ }
+paint();
+</script>

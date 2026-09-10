@@ -19,6 +19,7 @@ import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, type TranscriptHandle } from "./transcript.ts";
+import * as InputLock from "./input-lock.ts";
 
 const HOST = "127.0.0.1";
 const PORT = Number(process.env.HERDR_WEB_PORT || 7878);
@@ -467,6 +468,35 @@ const server = Bun.serve<WsData>({
           return Response.json(
             { error: e instanceof Error ? e.message : "upload failed" }, { status: 400 });
         }
+      }
+
+      // Input arbitration for a shared display. GET reads, POST acts. The owner
+      // is taken from the caller's declared side, not inferred: a human clicking
+      // "take input" and an agent's driver are different actors on one display.
+      if (url.pathname === "/api/input-lock") {
+        const paneId = url.searchParams.get("pane_id");
+        if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        if (req.method === "GET") return Response.json(InputLock.status(paneId));
+        if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
+
+        const body = await req.json().catch(() => ({} as any));
+        const owner = body?.owner === "agent" ? "agent" : "user";
+        const ttl = Number(body?.ttl_ms ?? 30000);
+        const act = String(body?.action ?? "claim");
+
+        if (act === "release") return Response.json({ ok: true, state: InputLock.release(paneId, owner) });
+        if (act === "heartbeat") return Response.json({ ok: true, state: InputLock.heartbeat(paneId, owner, ttl) });
+        if (act === "claim") {
+          // Only a human may force. An agent that could seize the display from
+          // the person watching it defeats the point of arbitrating at all.
+          const force = owner === "user" && !!body?.force;
+          const label = typeof body?.label === "string"
+            ? body.label.slice(0, 60)
+            : (whoami(req)?.name ?? null);
+          const r = InputLock.claim(paneId, owner, label, ttl, force);
+          return Response.json(r, { status: r.ok ? 200 : 409 });
+        }
+        return Response.json({ error: "action must be claim|release|heartbeat" }, { status: 400 });
       }
 
       if (url.pathname === "/api/presence") {

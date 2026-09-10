@@ -165,8 +165,15 @@
   #chatq .f{color:#f87171}
 
   /* ---------- embedded view ---------- */
-  #frameview{display:none;flex:1;min-height:0;flex-direction:column;background:var(--bg)}
+  /* A MODAL over the workspace, not a view that replaces it. The embedded page
+     is a thing you glance at and dismiss while staying where you were — losing
+     the terminal or chat underneath it to look at a browser is the wrong trade. */
+  #frameview{display:none;position:absolute;inset:14px;z-index:40;
+    flex-direction:column;background:var(--bg);border:1px solid #5c4a1c;
+    border-radius:8px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.6)}
   #frameview.on{display:flex}
+  #framescrim{display:none;position:absolute;inset:0;z-index:39;background:rgba(6,8,12,.55)}
+  #framescrim.on{display:block}
   /* The bar is not decoration: agent-controlled content is on screen, so the
      surrounding chrome has to say whose it is and where it came from. */
   #framebar{display:flex;align-items:center;gap:10px;padding:5px 11px;flex:none;
@@ -178,6 +185,7 @@
   #framebar button{background:transparent;border:1px solid #5c4a1c;color:#e8c9a6;
     border-radius:5px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer;flex:none}
   #framebar button:hover{border-color:var(--blocked);color:var(--blocked)}
+  #frameclose{font-size:15px !important;line-height:1;padding:1px 8px !important}
   #frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
 
   /* ---------- structured chat view ----------
@@ -304,6 +312,14 @@
   #ctlmode{font-size:11px;padding:3px 8px;border-radius:4px;color:var(--dim);
     border:1px solid var(--line);background:var(--card);white-space:nowrap}
   #ctlmode.on{color:var(--working);border-color:var(--working)}
+
+  #lockstate{margin-left:auto;padding:2px 7px;border-radius:4px;font-size:11px;
+    border:1px solid #5c4a1c;background:rgba(0,0,0,.25)}
+  #lockstate.mine{color:#9ece6a;border-color:#9ece6a}
+  #lockstate.theirs{color:#e0af68;border-color:#e0af68}
+  #framebar button{font:inherit;font-size:11px;padding:3px 8px;cursor:pointer;
+    border-radius:4px;color:#e8c9a6;background:rgba(0,0,0,.25);border:1px solid #5c4a1c}
+  #framebar button:hover{color:#fff;border-color:#e8c9a6}
 
   .loadmore{display:flex;justify-content:center;padding:6px 0 8px}
   .loadmore button{font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;
@@ -432,12 +448,17 @@
     </div>
     <div id="askctx"><div class="q" id="askq"></div><div id="presetrow"></div></div>
     <div id="term"></div>
+    <div id="framescrim"></div>
     <div id="frameview">
       <div id="framebar">
         <span class="lbl">embedded view</span>
         <span id="frameurl"></span>
         <span id="framewho"></span>
-        <button id="frameopen">open in a tab</button>
+        <span id="lockstate" title="Who can send input to this display">input: —</span>
+        <button id="locktake">take input</button>
+        <button id="lockrelease" style="display:none">release</button>
+        <button id="frameopen" title="Open this page in a separate browser tab">pop out</button>
+        <button id="frameclose" title="Close (Esc)">&times;</button>
       </div>
       <iframe id="frame" sandbox="allow-scripts allow-same-origin allow-forms"
               referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>

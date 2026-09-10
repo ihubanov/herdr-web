@@ -17,6 +17,8 @@ const el = {
   chatview: $("chatview"), msgs: $("msgs"), cin: $("cin"), cgo: $("cgo"),
   chatbtn: $("chatbtn"),
   cclip: $("cclip"), cfile: $("cfile"), attachbar: $("attachbar"), dropveil: $("dropveil"),
+  lockstate: $("lockstate"), locktake: $("locktake"), lockrelease: $("lockrelease"),
+  framescrim: $("framescrim"), frameclose: $("frameclose"),
   frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
   divider: $("divider"), toggleside: $("toggleside"), fleetbtn: $("fleetbtn"), triage: $("triage"),
@@ -295,10 +297,19 @@ el.detach.onclick = detach;
 // ------------------------------------------------------------------ views
 function setView(v) {
   view = v;
+  // "frame" is an OVERLAY, not a peer view: whatever was underneath stays put
+  // and visible behind the scrim, which is what makes it read as a modal rather
+  // than a navigation. Only the modal's own visibility changes here.
+  if (v === "frame") {
+    el.frameview.classList.add("on");
+    el.framebtn.classList.add("on");
+    applyChatBtn(capability);
+    return;
+  }
   el.fleet.classList.toggle("on", v === "fleet");
   el.term.classList.toggle("hidden", v !== "terminal");
   el.chatview.classList.toggle("on", v === "chat");
-  el.frameview.classList.toggle("on", v === "frame");
+  el.frameview.classList.remove("on");
   el.framebtn.classList.toggle("on", v === "frame");
   el.fleetbtn.classList.toggle("on", v === "fleet");
   el.chatbtn.classList.toggle("on", v === "chat");
@@ -365,7 +376,7 @@ function setSidebar(hidden) {
 el.toggleside.onclick = () => setSidebar(!sidebarHidden);
 el.fleetbtn.onclick = toggleView;
 el.framebtn.onclick = () => {
-  if (view === "frame") { closeFrame(); setView("terminal"); }
+  if (view === "frame") { dismissFrame(); }
   else if (selected && capability?.iframe) openFrame(capability.iframe.url);
 };
 
@@ -379,12 +390,143 @@ function openFrame(url) {
   el.frameurl.textContent = url;
   const f = entry(selected);
   el.framewho.textContent = f ? `from ${f.title}` : "";
+  // Remember what was underneath so closing restores it rather than guessing.
+  frameUnder = view === "frame" ? frameUnder : view;
+  el.framescrim.classList.add("on");
   setView("frame");
+  startLockWatch(selected);
 }
 function closeFrame() {
   el.frame.src = "about:blank";
   el.frameurl.textContent = "";
+  el.framescrim.classList.remove("on");
+  stopLockWatch();
 }
+
+/** The view the modal was opened over, restored when it closes. */
+let frameUnder = "terminal";
+
+function dismissFrame() {
+  if (view !== "frame") return;
+  const back = frameUnder || (selected ? "terminal" : "fleet");
+  closeFrame();
+  setView(back);
+}
+
+el.frameclose.onclick = dismissFrame;
+el.framescrim.onclick = dismissFrame;
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && view === "frame") { dismissFrame(); e.preventDefault(); }
+});
+
+/* ------------------------------------------------- input arbitration (human)
+ * A shared display has two drivers. This is the human's end: it reads the lock,
+ * shows who holds it, and tells the embedded client whether to send input at
+ * all. The enforcement is in the client — viewOnly there means the events never
+ * leave the browser — so this is not merely an indicator.
+ * -------------------------------------------------------------------------- */
+let lockPane = null;
+let lockTimer = null;
+let lockState = null;
+let lockHeld = false;         // do WE hold it (so we know to heartbeat)
+
+function pushLockToFrame() {
+  try {
+    el.frame.contentWindow?.postMessage(
+      { kind: "herdr-input-lock", state: lockState }, "*");
+  } catch { /* frame not ready */ }
+}
+
+function renderLock() {
+  const s = lockState;
+  const mine = s?.owner === "user";
+  const theirs = s?.owner === "agent";
+  el.lockstate.className = mine ? "mine" : theirs ? "theirs" : "";
+  el.lockstate.textContent = mine ? "input: yours"
+    : theirs ? `input: agent${s.label ? ` (${s.label})` : ""}`
+    : "input: free";
+  el.locktake.style.display = mine ? "none" : "";
+  // Taking it from a working agent is a real interruption, so say so on the
+  // button rather than springing it after the click.
+  el.locktake.textContent = theirs ? "take input from agent" : "take input";
+  el.lockrelease.style.display = mine ? "" : "none";
+  pushLockToFrame();
+}
+
+async function lockCall(body) {
+  if (!lockPane) return null;
+  try {
+    const r = await fetch(auth(`/api/input-lock?pane_id=${encodeURIComponent(lockPane)}`), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    lockState = d.state ?? d;
+    renderLock();
+    return d;
+  } catch { return null; }
+}
+
+async function pollLock() {
+  if (!lockPane) return;
+  // Renewing is part of the poll: a lock we hold but stop renewing lapses, which
+  // is what should happen if this tab is closed or the machine sleeps.
+  if (lockHeld && lockState?.owner === "user") {
+    await lockCall({ owner: "user", action: "heartbeat", ttl_ms: 30000 });
+    return;
+  }
+  try {
+    const r = await fetch(auth(`/api/input-lock?pane_id=${encodeURIComponent(lockPane)}`));
+    lockState = await r.json();
+    if (lockState?.owner !== "user") lockHeld = false;
+    renderLock();
+  } catch { /* transient */ }
+}
+
+function startLockWatch(paneId) {
+  stopLockWatch();
+  lockPane = paneId;
+  lockState = null; lockHeld = false;
+  renderLock();
+  void pollLock();
+  lockTimer = setInterval(pollLock, 5000);
+}
+
+function stopLockWatch() {
+  if (lockTimer) clearInterval(lockTimer);
+  lockTimer = null;
+  if (lockHeld && lockPane) void lockCall({ owner: "user", action: "release" });
+  lockPane = null; lockHeld = false; lockState = null;
+}
+
+el.locktake.onclick = async () => {
+  // force: a person watching a stuck agent needs a way in that does not depend
+  // on that agent still being alive to hand over.
+  const d = await lockCall({ owner: "user", action: "claim", ttl_ms: 30000, force: true });
+  lockHeld = !!d?.ok || lockState?.owner === "user";
+  renderLock();
+};
+el.lockrelease.onclick = async () => {
+  await lockCall({ owner: "user", action: "release" });
+  lockHeld = false;
+  renderLock();
+};
+
+// The shim announces itself on load; answer immediately so a reloaded iframe
+// is not inert until the next poll.
+window.addEventListener("message", (ev) => {
+  if (ev.data?.kind === "herdr-shim-ready") pushLockToFrame();
+});
+
+// Releasing on unload keeps a closed tab from parking the display.
+window.addEventListener("pagehide", () => {
+  if (lockHeld && lockPane) {
+    navigator.sendBeacon?.(
+      auth(`/api/input-lock?pane_id=${encodeURIComponent(lockPane)}`),
+      new Blob([JSON.stringify({ owner: "user", action: "release" })],
+               { type: "application/json" }));
+  }
+});
 el.frameopen.onclick = () => {
   if (capability?.iframe) window.open(capability.iframe.url, "_blank", "noopener,noreferrer");
 };
