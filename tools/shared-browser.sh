@@ -32,6 +32,8 @@ NOVNC_ROOT=${NOVNC_ROOT:-/usr/share/novnc}
 stop() {
   pkill -f "websockify .*${WS_PORT} " 2>/dev/null || true
   pkill -f "x11vnc -display :${DISPLAY_N}\b" 2>/dev/null || true
+  pkill -f "cdp-gate.ts --listen $((9400 + DISPLAY_N))" 2>/dev/null || true
+  rm -rf "${XDG_RUNTIME_DIR:-/tmp}/herdr-novnc-${DISPLAY_N}" 2>/dev/null || true
   pkill -f "Xvfb :${DISPLAY_N}\b" 2>/dev/null || true
   if [ -n "${HERDR_PANE_ID:-}" ] && [ -n "${HERDR_BIN_PATH:-}" ]; then
     "$HERDR_BIN_PATH" pane report-metadata "$HERDR_PANE_ID" \
@@ -65,11 +67,21 @@ env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
     -listen 127.0.0.1 -localhost -no6 -rfbportv6 -1 \
   -nopw -forever -shared -bg -quiet >/dev/null 2>&1
 
+# The page we serve is OUR shim, not noVNC's stock vnc.html, because input
+# arbitration has to be enforced in the RFB client itself: viewOnly there means
+# the events are never sent. It needs noVNC's modules beside it, so the web root
+# is a directory that overlays the shim onto a symlink farm of the real thing.
+SHIM_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/novnc-shim"
+WEB_ROOT="${XDG_RUNTIME_DIR:-/tmp}/herdr-novnc-${DISPLAY_N}"
+rm -rf "$WEB_ROOT"; mkdir -p "$WEB_ROOT"
+for f in "$NOVNC_ROOT"/*; do ln -sf "$f" "$WEB_ROOT/$(basename "$f")"; done
+cp "$SHIM_SRC/index.html" "$WEB_ROOT/shared.html"
+
 # Same for websockify: a bare port means 0.0.0.0.
-websockify --web="$NOVNC_ROOT" "127.0.0.1:${WS_PORT}" "localhost:${VNC_PORT}" >/dev/null 2>&1 &
+websockify --web="$WEB_ROOT" "127.0.0.1:${WS_PORT}" "localhost:${VNC_PORT}" >/dev/null 2>&1 &
 sleep 1
 
-URL="http://127.0.0.1:${WS_PORT}/vnc.html?autoconnect=1&resize=scale"
+URL="http://127.0.0.1:${WS_PORT}/shared.html?resize=scale"
 
 if [ "$LAUNCH_BROWSER" = 1 ]; then
   for b in chromium google-chrome chromium-browser firefox; do
@@ -85,6 +97,18 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
         --remote-debugging-port=$((9300 + DISPLAY_N)) \
         about:blank >/dev/null 2>&1 &
       echo "browser: $b on :${DISPLAY_N} (CDP $((9300 + DISPLAY_N)))"
+      # The agent drives through CDP, so that is where the agent side of the
+      # lock is enforced. Chrome listens on a private port; the gate in front of
+      # it refuses to forward unless the lock says the agent holds input. An
+      # agent that ignores the lock therefore cannot connect at all, rather than
+      # being asked nicely not to.
+      if [ -n "${HERDR_PANE_ID:-}" ]; then
+        "$(dirname "${BASH_SOURCE[0]}")/cdp-gate.ts" \
+          --listen $((9400 + DISPLAY_N)) --target $((9300 + DISPLAY_N)) \
+          --pane "$HERDR_PANE_ID" --web "${HERDR_WEB_URL:-http://127.0.0.1:7878}" \
+          >/dev/null 2>&1 &
+        echo "cdp gate: 127.0.0.1:$((9400 + DISPLAY_N)) (agent must hold the input lock)"
+      fi
       break
     fi
   done
