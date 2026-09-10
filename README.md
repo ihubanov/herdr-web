@@ -160,6 +160,28 @@ bun tools/handshake.ts --sock <path>   # direct, skips discovery
 
 ## Embedded views (off by default)
 
+### Showing something to the user: `tools/herdr-share.sh`
+
+From inside a herdr pane an agent can put a page on the user's screen:
+
+```
+tools/herdr-share.sh url http://127.0.0.1:5173     # something you already serve
+tools/herdr-share.sh browser                       # a browser you BOTH can drive
+tools/herdr-share.sh status
+tools/herdr-share.sh stop
+```
+
+`url` is for a page you are already serving. `browser` is for driving a GUI the
+user can also touch: it runs on a virtual display served over noVNC, with input
+arbitration so the two of you cannot fight over the pointer.
+
+**A browser on the user's real desktop cannot be shown here.** There is no
+surface to stream, so a launcher that opens a normal window on `$DISPLAY` will
+never appear in the embedded view. That is the usual reason nothing happens.
+
+The command reports refusals rather than failing silently — a non-loopback URL
+under the default policy exits non-zero saying so.
+
 An agent can advertise a URL as an `iframe_url` pane token — the same discovery
 path as the agent stream — and herdr-web will show it as a view.
 
