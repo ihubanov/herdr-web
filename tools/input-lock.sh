@@ -17,10 +17,22 @@ set -euo pipefail
 # when the environment does not carry them. Without this every call 401s and
 # reports a lock failure that never happened.
 ENVF="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/herdr-web}/env"
-_cfg() { [ -f "$ENVF" ] || return 0; grep -E "^(export[[:space:]]+)?$1=" "$ENVF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' '; }
-WEB="${HERDR_WEB_URL:-http://127.0.0.1:$(_cfg HERDR_WEB_PORT || echo 7878)}"
+# Returns non-zero when it finds nothing, so `|| echo <default>` actually fires.
+# Returning 0 on a missing file made the port interpolate EMPTY, giving
+# WEB=http://127.0.0.1: — every request then failed and the script reported a
+# refusal for an advertisement that had in fact succeeded.
+_cfg() {
+  [ -f "$ENVF" ] || return 1
+  local v
+  v="$(grep -E "^(export[[:space:]]+)?$1=" "$ENVF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' ')"
+  [ -n "$v" ] || return 1
+  printf '%s' "$v"
+}
+WEB="${HERDR_WEB_URL:-http://127.0.0.1:${HERDR_WEB_PORT:-$(_cfg HERDR_WEB_PORT || echo 7878)}}"
 WEB="${WEB%/}"
-TOKEN="${HERDR_WEB_TOKEN:-$(_cfg HERDR_WEB_TOKEN)}"
+# `|| true`: _cfg now fails when it finds nothing, and a failing command
+# substitution inside an assignment aborts the script under `set -e`.
+TOKEN="${HERDR_WEB_TOKEN:-$(_cfg HERDR_WEB_TOKEN || true)}"
 PANE="${HERDR_PANE_ID:-}"
 TTL=30000
 LABEL="agent"
