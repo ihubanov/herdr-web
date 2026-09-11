@@ -460,7 +460,12 @@
         <button id="frameopen" title="Open this page in a separate browser tab">pop out</button>
         <button id="frameclose" title="Close (Esc)">&times;</button>
       </div>
-      <iframe id="frame" sandbox="allow-scripts allow-same-origin allow-forms"
+      <!-- NO allow-same-origin. The shared display is now served through this
+           same origin, and allow-same-origin on a same-origin frame is a sandbox
+           escape: the framed page could reach into this document. Dropping it
+           gives the frame an opaque origin, which is what the guard that refuses
+           to frame our own origin was protecting against. -->
+      <iframe id="frame" sandbox="allow-scripts allow-forms"
               referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
     </div>
 

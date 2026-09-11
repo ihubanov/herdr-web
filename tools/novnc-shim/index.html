@@ -28,10 +28,15 @@
 import RFB from './core/rfb.js';
 
 const qs = new URLSearchParams(location.search);
-const host = location.hostname;
-const port = location.port || (location.protocol === 'https:' ? 443 : 80);
+// Derive the socket from where THIS PAGE was served, not from a fixed host and
+// port. Served straight off websockify that is /websockify; served through the
+// herdr-web bridge it is /shared/<pane>/websockify, on whatever host and scheme
+// the viewer actually reached — which is the whole point of proxying it: a
+// remote viewer must never be told to connect to 127.0.0.1, that is their own
+// machine. wss when the page is https, or the browser blocks it as mixed content.
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-const path = qs.get('path') || 'websockify';
+const dir = location.pathname.replace(/[^/]*$/, '');      // keep the trailing slash
+const wsPath = qs.get('path') || (dir + 'websockify');
 
 const screenEl = document.getElementById('screen');
 const veil = document.getElementById('veil');
@@ -63,7 +68,8 @@ function setLock(state) {
 }
 
 try {
-  rfb = new RFB(screenEl, `${proto}://${host}:${port}/${path}`, {});
+  const wsUrl = `${proto}://${location.host}${wsPath.startsWith('/') ? '' : '/'}${wsPath}`;
+  rfb = new RFB(screenEl, wsUrl, {});
   rfb.scaleViewport = qs.get('resize') !== 'off';
   rfb.clipViewport = false;
   rfb.viewOnly = true;                 // until told otherwise

@@ -139,6 +139,31 @@ function authed(req: Request): boolean {
   return whoami(req) !== null;
 }
 
+/**
+ * The local origin a pane advertises for its shared display.
+ *
+ * The pane token still holds the real http://127.0.0.1:<port>/... URL, because
+ * that is what is true ON THIS HOST. What must never reach a remote viewer is
+ * that URL itself — their browser would resolve 127.0.0.1 to their own machine
+ * and show nothing, which is exactly what happened behind the tunnel. So the
+ * token stays the single source of truth and the bridge proxies it.
+ *
+ * Only loopback targets are ever proxied: this turns herdr-web into an open
+ * relay otherwise, reachable by anyone who can name a pane.
+ */
+async function sharedTarget(paneId: string): Promise<URL | null> {
+  try {
+    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+    const raw = String(tokens.iframe_url ?? "").trim();
+    if (!raw) return null;
+    const u = new URL(raw);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const h = u.hostname;
+    if (h !== "127.0.0.1" && h !== "localhost" && h !== "::1" && h !== "[::1]") return null;
+    return u;
+  } catch { return null; }
+}
+
 // ---- presence: who is watching which pane -----------------------------------
 const presence = new Map<string, Set<string>>();   // paneId -> user labels
 function joinPane(paneId: string, who: string) {
@@ -180,7 +205,7 @@ const MIME: Record<string, string> = {
 };
 
 interface WsData {
-  kind: "events" | "terminal" | "stream";
+  kind: "events" | "terminal" | "stream" | "novnc";
   paneId?: string;
   session?: TerminalSession;
   unsub?: () => void;
@@ -193,6 +218,11 @@ interface WsData {
   stream?: StreamHandle;
   /** Transcript follower, for agents with no live protocol socket. */
   tail?: TranscriptHandle;
+  /** Upstream websockify socket, for a proxied shared display. */
+  up?: WebSocket;
+  wsTarget?: string;
+  /** Frames that arrived before the upstream finished connecting. */
+  pending?: Array<string | Uint8Array>;
 }
 
 const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
@@ -275,6 +305,60 @@ const server = Bun.serve<WsData>({
       const paneId = decodeURIComponent(url.pathname.slice("/ws/terminal/".length));
       if (srv.upgrade(req, { data: { kind: "terminal", paneId, who: Identity.label(u) } })) return undefined as any;
       return new Response("upgrade failed", { status: 400 });
+    }
+
+    // --- Shared display proxy ----------------------------------------------
+    // Serves the pane's noVNC surface through THIS origin, so it rides whatever
+    // tunnel the viewer already came in on. Without it the browser modal only
+    // ever worked for a viewer on the same host as herdr-web.
+    if (url.pathname.startsWith("/shared/")) {
+      const rest = url.pathname.slice("/shared/".length);
+      const cut = rest.indexOf("/");
+      const paneId = decodeURIComponent(cut === -1 ? rest : rest.slice(0, cut));
+      const sub = cut === -1 ? "" : rest.slice(cut + 1);
+
+      // The iframe cannot set headers, and its subrequests carry no query token,
+      // so the entry request mints a path-scoped cookie the rest ride on.
+      const cookieName = `hw_shared_${paneId.replace(/[^A-Za-z0-9]/g, "_")}`;
+      const cookies = req.headers.get("cookie") ?? "";
+      const hasCookie = cookies.split(";").some((c) => {
+        const [k, v] = c.trim().split("=");
+        return k === cookieName && identity.resolve(decodeURIComponent(v ?? "")) !== null;
+      });
+      const qTok = url.searchParams.get("token");
+      const viaQuery = qTok !== null && identity.resolve(qTok) !== null;
+      if (!hasCookie && !viaQuery) return new Response("unauthorized", { status: 401 });
+
+      const target = await sharedTarget(paneId);
+      if (!target) return new Response("this pane is not sharing a display", { status: 404 });
+
+      // WebSocket: accept here, dial websockify in open(), relay both ways.
+      if (sub === "websockify" || sub.endsWith("/websockify")) {
+        const wsTarget = `${target.protocol === "https:" ? "wss:" : "ws:"}//${target.host}/websockify`;
+        if (srv.upgrade(req, { data: { kind: "novnc", paneId, wsTarget } })) return undefined as any;
+        return new Response("upgrade failed", { status: 400 });
+      }
+
+      // The shim itself, served from OUR origin so its relative imports resolve
+      // back through this proxy.
+      const isEntry = sub === "" || sub === "index.html" || sub === "shared.html";
+      const upstream = new URL(isEntry ? "/shared.html" : `/${sub}`, target.origin);
+      let res: Response;
+      try {
+        res = await fetch(upstream, { signal: AbortSignal.timeout(8000) });
+      } catch {
+        return new Response("shared display is not reachable", { status: 502 });
+      }
+      const headers = new Headers();
+      const ct = res.headers.get("content-type");
+      if (ct) headers.set("content-type", ct);
+      headers.set("cache-control", "no-cache");
+      if (isEntry && viaQuery && qTok) {
+        headers.append("set-cookie",
+          `${cookieName}=${encodeURIComponent(qTok)}; Path=/shared/${encodeURIComponent(paneId)}; ` +
+          `HttpOnly; SameSite=Lax; Max-Age=28800`);
+      }
+      return new Response(res.body, { status: res.status, headers });
     }
 
     // --- JSON API -----------------------------------------------------------
@@ -417,7 +501,22 @@ const server = Bun.serve<WsData>({
           const raw = String(tokens.iframe_url ?? "").trim();
           if (raw) {
             const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
-            if (v.ok) iframe = { url: v.url };
+            if (v.ok) {
+              // Hand back a URL on OUR origin when this is a shared display we
+              // can proxy. A raw 127.0.0.1 URL is correct on this host and
+              // useless to everyone else; the proxied one works for both.
+              const t = await sharedTarget(paneId);
+              if (t) {
+                const p = new URL(v.url);
+                const tail = p.pathname.replace(/^\/+/, "");
+                iframe = {
+                  url: `/shared/${encodeURIComponent(paneId)}/` +
+                       (tail === "shared.html" ? "" : tail) + p.search,
+                };
+              } else {
+                iframe = { url: v.url };
+              }
+            }
             else iframeRejected = v.reason;
           }
         } catch { /* pane vanished */ }
@@ -710,6 +809,28 @@ const server = Bun.serve<WsData>({
         return;
       }
 
+      if (d.kind === "novnc" && d.wsTarget) {
+        // RFB is binary and starts talking immediately, so anything the viewer
+        // sends before the upstream is ready must be held, not dropped — losing
+        // a handshake byte wedges the session with no error anywhere.
+        d.pending = [];
+        const up = new WebSocket(d.wsTarget);
+        up.binaryType = "arraybuffer";
+        d.up = up;
+        up.onopen = () => {
+          for (const m of d.pending ?? []) { try { up.send(m); } catch {} }
+          d.pending = [];
+        };
+        up.onmessage = (ev: any) => {
+          try {
+            ws.send(ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data);
+          } catch {}
+        };
+        up.onclose = () => { try { ws.close(); } catch {} };
+        up.onerror = () => { try { ws.close(1011, "shared display unreachable"); } catch {} };
+        return;
+      }
+
       if (d.kind === "terminal" && d.paneId) {
         joinPane(d.paneId, d.who || "operator");
         ws.send(JSON.stringify({ type: "_ready", you: d.who || "operator" }));
@@ -718,6 +839,13 @@ const server = Bun.serve<WsData>({
 
     message(ws, raw) {
       const d = ws.data;
+
+      if (d.kind === "novnc") {
+        const payload = typeof raw === "string" ? raw : new Uint8Array(raw as any);
+        if (d.up && d.up.readyState === 1) { try { d.up.send(payload); } catch {} }
+        else d.pending?.push(payload);
+        return;
+      }
 
       if (d.kind === "stream") {
         const txt = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
@@ -804,6 +932,7 @@ const server = Bun.serve<WsData>({
       eventClients.delete(ws);
       ws.data.stream?.close();
       ws.data.tail?.close();
+      if (ws.data.up) { try { ws.data.up.close(); } catch {} }
       ws.data.unsub?.();
       ws.data.session?.release();
       if ((ws.data.kind === "terminal" || ws.data.kind === "stream") && ws.data.paneId) {

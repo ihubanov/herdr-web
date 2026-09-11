@@ -399,7 +399,23 @@ el.framebtn.onclick = () => {
  * on a same-origin frame would let it drop its own sandbox and read our token.
  */
 function openFrame(url) {
-  el.frame.src = url;
+  const ours = url.startsWith("/shared/");
+  // The sandbox depends on WHOSE page this is, which is the distinction the old
+  // blanket attribute could not make.
+  //
+  // Our own proxied shim gets allow-same-origin, and needs it: without it the
+  // frame has an opaque origin, its ES module import becomes a cross-origin
+  // fetch, and the auth cookie is not sent — the frame loads nothing, silently.
+  // It is safe here because we author that document; the only remote content in
+  // it is pixels on a canvas.
+  //
+  // An agent-advertised URL is somebody else's page and gets NO same-origin
+  // privilege, on top of the policy that already refuses to frame our origin.
+  el.frame.setAttribute("sandbox",
+    ours ? "allow-scripts allow-forms allow-same-origin" : "allow-scripts allow-forms");
+  // A proxied display is a path on our origin, and an iframe cannot set an auth
+  // header, so the token rides in the query as it does everywhere else here.
+  el.frame.src = ours ? auth(url) : url;
   el.frameurl.textContent = url;
   const f = entry(selected);
   el.framewho.textContent = f ? `from ${f.title}` : "";
