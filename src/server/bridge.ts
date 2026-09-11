@@ -7,7 +7,7 @@
  *   - token is generated per-run and printed once, or set HERDR_WEB_TOKEN
  *   - RPC proxying is allow-listed by method prefix, not open passthrough
  */
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -620,8 +620,21 @@ const server = Bun.serve<WsData>({
       return new Response("not found", { status: 404 });
     }
     const body = readFileSync(file);
+    // Validators, not lifetimes. With neither, a CDN in front of this is free to
+    // pin a stale client indefinitely — and even without one, a browser holds
+    // the old app.js across a server restart, which looks exactly like a change
+    // that did not take. `no-cache` means revalidate every time, not "do not
+    // store": the ETag then makes that revalidation a 304 rather than a refetch.
+    const etag = `W/"${createHash("sha1").update(body).digest("base64url").slice(0, 27)}"`;
+    if (req.headers.get("if-none-match") === etag) {
+      return new Response(null, { status: 304, headers: { etag, "cache-control": "no-cache" } });
+    }
     return new Response(body, {
-      headers: { "content-type": MIME[extname(file)] || "application/octet-stream" },
+      headers: {
+        "content-type": MIME[extname(file)] || "application/octet-stream",
+        "cache-control": "no-cache",
+        etag,
+      },
     });
   },
 
