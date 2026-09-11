@@ -13,8 +13,14 @@
 # --pane defaults to $HERDR_PANE_ID, so inside a herdr pane it can be omitted.
 set -euo pipefail
 
-WEB="${HERDR_WEB_URL:-http://127.0.0.1:7878}"
-TOKEN="${HERDR_WEB_TOKEN:-}"
+# Same as herdr-share: take port and token from herdr-web's own plugin config
+# when the environment does not carry them. Without this every call 401s and
+# reports a lock failure that never happened.
+ENVF="${HERDR_PLUGIN_CONFIG_DIR:-$HOME/.config/herdr/plugins/config/herdr-web}/env"
+_cfg() { [ -f "$ENVF" ] || return 0; grep -E "^(export[[:space:]]+)?$1=" "$ENVF" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'"'"' '; }
+WEB="${HERDR_WEB_URL:-http://127.0.0.1:$(_cfg HERDR_WEB_PORT || echo 7878)}"
+WEB="${WEB%/}"
+TOKEN="${HERDR_WEB_TOKEN:-$(_cfg HERDR_WEB_TOKEN)}"
 PANE="${HERDR_PANE_ID:-}"
 TTL=30000
 LABEL="agent"

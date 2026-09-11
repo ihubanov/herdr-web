@@ -47,6 +47,19 @@ const SIDEBAR_MAX_PCT = 40;
 const SIDEBAR_MIN_PX = 170;
 const SIDEBAR_MAX_PX = 560;
 
+/**
+ * WebSocket URL for a path on this origin.
+ *
+ * The scheme MUST follow the page's: a browser blocks ws:// from an https:
+ * page as mixed content, silently, so behind TLS every socket here — terminal,
+ * events and stream — simply never connects and the UI looks dead rather than
+ * broken. Hardcoding ws:// worked only because this started life on loopback.
+ */
+function wsUrl(path) {
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${scheme}//${location.host}${path}`;
+}
+
 const LS = {
   get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
@@ -239,7 +252,7 @@ function attach(f, mode = "observe") {
   updateTitle();
 
   const ws = new WebSocket(
-    `ws://${location.host}${auth(`/ws/terminal/${encodeURIComponent(f.pane_id)}`)}`);
+    wsUrl(auth(`/ws/terminal/${encodeURIComponent(f.pane_id)}`)));
   ws.binaryType = "arraybuffer";
   termSock = ws;
   ws.onmessage = (e) => {
@@ -1084,7 +1097,7 @@ async function loadFleet(force = false) {
 }
 
 function connectEvents() {
-  const ws = new WebSocket(`ws://${location.host}${auth("/ws/events")}`);
+  const ws = new WebSocket(wsUrl(auth("/ws/events")));
   ws.onopen = () => { el.conn.className = "live"; el.conn.textContent = "live"; };
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
@@ -1139,7 +1152,7 @@ function openChat(paneId) {
   setView("chat");
 
   const ws = new WebSocket(
-    `ws://${location.host}${auth(`/ws/stream/${encodeURIComponent(paneId)}`)}`);
+    wsUrl(auth(`/ws/stream/${encodeURIComponent(paneId)}`)));
   streamSock = ws;
   ws.onmessage = (e) => {
     let f; try { f = JSON.parse(e.data); } catch { return; }
