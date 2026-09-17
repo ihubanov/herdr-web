@@ -36,6 +36,20 @@ const identity = new Identity();
 const DEFAULT_LAUNCH_CMD = (process.env.HERDR_WEB_DEFAULT_LAUNCH_CMD || "").trim();
 
 /**
+ * Launch-command policy. Default OFF keeps the agnostic behavior above (the
+ * dialog shows an editable, prefilled command that works for codex/cursor/shell).
+ * A single-agent deployment can set HERDR_WEB_LOCK_LAUNCH=1 to LOCK the field:
+ * the new-session dialog then shows the base command read-only and offers only a
+ * "--dangerously-skip-permissions" checkbox (default off) instead of free text.
+ * This is a UI safety-rail, not a security boundary — a pane is a terminal, so a
+ * user with a pane can type anything regardless; it just stops the new-session
+ * dialog from being an arbitrary-command box.
+ */
+const LOCK_LAUNCH = ["1", "true", "yes", "on"].includes(
+  (process.env.HERDR_WEB_LOCK_LAUNCH || "").trim().toLowerCase(),
+);
+
+/**
  * Brandable name for the agent people are talking to, e.g. "Alice".
  *
  * In a shared session the transcript reads "alice: …" / "bob: …" with the
@@ -451,6 +465,7 @@ const server = Bun.serve<WsData>({
           multiuser: identity.multiuser, users: identity.multiuser ? identity.names() : [],
           canDestroy: u.isAdmin, adminOnly: [...ADMIN_ONLY],
           defaultLaunchCmd: DEFAULT_LAUNCH_CMD,
+          lockLaunch: LOCK_LAUNCH,
           agentName: AGENT_NAME,
         });
       }

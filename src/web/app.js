@@ -786,13 +786,29 @@ function openModal({ title, sub, fields, okLabel = "create", danger = false, onO
   el.merr.textContent = "";
   el.mok.textContent = okLabel;
   el.mok.classList.toggle("danger", danger);
-  el.mfields.innerHTML = (fields || []).map((f) =>
-    `<label for="f_${f.k}">${esc(f.label)}</label>
-     <input id="f_${f.k}" value="${esc(f.value ?? "")}" placeholder="${esc(f.placeholder ?? "")}" />`
-  ).join("");
+  el.mfields.innerHTML = (fields || []).map((f) => {
+    if (f.type === "checkbox") {
+      // Boolean toggle (e.g. --dangerously-skip-permissions). Default from f.value.
+      return `<label class="mcheck"><input type="checkbox" id="f_${f.k}"${f.value ? " checked" : ""} /> ${esc(f.label)}</label>`;
+    }
+    if (f.type === "static") {
+      // Read-only display — a locked value the user cannot edit. The value is
+      // carried in data-val so the submit handler still reads it back.
+      return `<label>${esc(f.label)}</label>
+       <div class="mstatic" id="f_${f.k}" data-val="${esc(f.value ?? "")}">${esc(f.value ?? "")}</div>`;
+    }
+    return `<label for="f_${f.k}">${esc(f.label)}</label>
+     <input id="f_${f.k}" value="${esc(f.value ?? "")}" placeholder="${esc(f.placeholder ?? "")}" />`;
+  }).join("");
   modalOK = async () => {
     const vals = {};
-    for (const f of fields || []) vals[f.k] = document.getElementById(`f_${f.k}`).value.trim();
+    for (const f of fields || []) {
+      const node = document.getElementById(`f_${f.k}`);
+      if (!node) continue;
+      if (f.type === "checkbox") vals[f.k] = node.checked;
+      else if (f.type === "static") vals[f.k] = node.dataset.val ?? f.value ?? "";
+      else vals[f.k] = node.value.trim();
+    }
     el.mok.disabled = true;
     try {
       await onOK(vals);
@@ -807,7 +823,7 @@ function openModal({ title, sub, fields, okLabel = "create", danger = false, onO
     }
   };
   el.modal.classList.add("on");
-  const first = el.mfields.querySelector("input");
+  const first = el.mfields.querySelector("input:not([type=checkbox])");
   if (first) setTimeout(() => { first.focus(); first.select(); }, 30);
 }
 function closeModal() { el.modal.classList.remove("on"); modalOK = null; }
@@ -820,28 +836,46 @@ function spaceOf(wsId) { return fleet.find((f) => f.workspace_id === wsId); }
 
 function newSession(wsId) {
   const ref = spaceOf(wsId);
+  const base = (me?.defaultLaunchCmd || "").trim();
+  // Locked mode (HERDR_WEB_LOCK_LAUNCH): the launch command is fixed to `base`,
+  // and the only choice is whether to add --dangerously-skip-permissions. Needs
+  // a base to lock TO — with none, fall back to the editable field so the dialog
+  // is never a dead end.
+  const locked = !!me?.lockLaunch && !!base;
+  const cmdFields = locked
+    ? [
+        { k: "cmd", label: "launch command", type: "static", value: base },
+        { k: "skip", label: "--dangerously-skip-permissions", type: "checkbox", value: false },
+      ]
+    : [
+        { k: "cmd", label: "launch command (optional)", value: base,
+          placeholder: "leave blank for a shell" },
+      ];
   openModal({
     title: "New session",
     sub: `A new tab in ${ref?.workspace_label ?? wsId}. It starts a shell in this directory; run your agent there.`,
     fields: [
       { k: "cwd", label: "working directory", value: ref?.cwd || "", placeholder: "/path/to/repo" },
       { k: "label", label: "name (optional)", value: "", placeholder: "leave blank to auto-name" },
-      { k: "cmd", label: "launch command (optional)", value: me?.defaultLaunchCmd || "",
-        placeholder: "leave blank for a shell" },
+      ...cmdFields,
     ],
     onOK: async (v) => {
       if (!v.cwd) throw new Error("working directory is required");
       const res = await rpc("tab.create", {
         workspace_id: wsId, cwd: v.cwd, label: v.label || null, focus: false,
       });
-      if (!v.cmd) return;
+      // Build the launch command. Locked → the fixed base plus the optional
+      // skip-permissions flag, never free text. Unlocked → the editable field.
+      let cmd = locked ? base : (v.cmd || "").trim();
+      if (locked && v.skip) cmd += " --dangerously-skip-permissions";
+      if (!cmd) return;
       // herdr cannot spawn a command as the pane's foreground directly, so run
       // it in the fresh shell. An `exec` in the command replaces that shell,
       // which is what keeps the agent (not bash) as the foreground process.
       const paneId = res?.root_pane?.pane_id ?? res?.pane?.pane_id;
       if (!paneId) return;
       await new Promise((r) => setTimeout(r, 1500));   // let the shell come up
-      await rpc("pane.send_input", { pane_id: paneId, text: v.cmd, keys: ["enter"] });
+      await rpc("pane.send_input", { pane_id: paneId, text: cmd, keys: ["enter"] });
     },
   });
 }
