@@ -77,14 +77,41 @@ export function pending(paneId: string): QueuedMessage[] {
   return (queues.get(paneId) ?? []).filter((m) => m.state === "queued" || m.state === "sending");
 }
 
+/** How the author travels with a message delivered as keystrokes. */
+export type AttrFmt = "json1" | "prefix" | "none";
+
 /**
- * Enqueue an attributed message. The prefix is applied HERE, from the
+ * Wrap a message so the author survives delivery.
+ *
+ * There is no out-of-band channel on this path: the pane receives typed
+ * characters and nothing else. So attribution has to live IN the line, and the
+ * only question is whether it corrupts the message.
+ *
+ *  json1   {"herdr":1,"from":"alice","text":"…"} — the author is a field, the
+ *          message is untouched, and a harness can unwrap it exactly. Only sent
+ *          to panes that have ASKED for it, because an agent that does not
+ *          understand the envelope would read JSON where a sentence should be.
+ *  prefix  "alice: …" — legacy. Readable by any agent, but it mangles the
+ *          message: the agent cannot tell the attribution from the content, and
+ *          anything that parses its own input sees a corrupted first line.
+ *  none    the message verbatim, attribution dropped.
+ */
+function wrap(author: string, text: string, fmt: AttrFmt): string {
+  if (!author || fmt === "none") return text;
+  if (fmt === "json1") return JSON.stringify({ herdr: 1, from: author, text });
+  return `${author}: ${text}`;
+}
+
+/**
+ * Enqueue an attributed message. The author is applied HERE, from the
  * authenticated identity — never from anything the client supplied.
  */
-export function say(paneId: string, author: string, text: string): QueuedMessage {
+export function say(
+  paneId: string, author: string, text: string, fmt: AttrFmt = "prefix",
+): QueuedMessage {
   const msg: QueuedMessage = {
     id: `m${++seq}`, paneId, author,
-    text: author ? `${author}: ${text}` : text,
+    text: wrap(author, text, fmt),
     queuedAt: Date.now(), state: "queued",
   };
   const q = queues.get(paneId) ?? [];

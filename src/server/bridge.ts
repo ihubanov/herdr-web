@@ -16,7 +16,7 @@ import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
 import { openTerminalSession, type TerminalSession } from "./terminal-bridge.ts";
 import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from "./fleet.ts";
 import { Identity, type User } from "./identity.ts";
-import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending } from "./send-queue.ts";
+import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending, type AttrFmt } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
@@ -72,6 +72,35 @@ const AGENT_NAME = (process.env.HERDR_WEB_AGENT_NAME || "").trim();
  *   on        any http(s) origin
  */
 type IframePolicy = "off" | "loopback" | "on";
+/**
+ * How the author reaches an agent that is fed keystrokes.
+ *
+ *   auto   (default) the structured envelope when the pane asks for it by
+ *          advertising attr_fmt=json1, the legacy prefix otherwise
+ *   json   always the envelope — only sane if every agent here understands it
+ *   prefix always "name: message", the old behaviour
+ *   none   never attribute
+ */
+const ATTRIBUTION = (process.env.HERDR_WEB_ATTRIBUTION || "auto").toLowerCase();
+
+/**
+ * Ask the pane how it wants attribution. Same discovery route as stream_sock
+ * and iframe_url: a metadata token the agent sets, so an agent opts IN to the
+ * envelope and nothing else is disturbed by its arrival.
+ */
+async function attrFmtFor(paneId: string): Promise<AttrFmt> {
+  if (ATTRIBUTION === "json") return "json1";
+  if (ATTRIBUTION === "prefix") return "prefix";
+  if (ATTRIBUTION === "none") return "none";
+  try {
+    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+    const want = String(tokens.attr_fmt ?? "").trim().toLowerCase();
+    if (want === "json1" || want === "json") return "json1";
+    if (want === "none") return "none";
+  } catch { /* pane vanished; fall through */ }
+  return "prefix";
+}
+
 const UPLOAD_DIR = process.env.HERDR_WEB_UPLOAD_DIR
   || join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "herdr-web", "uploads");
 const UPLOAD_MAX = Number(process.env.HERDR_WEB_UPLOAD_MAX_BYTES || 25 * 1024 * 1024);
@@ -420,7 +449,7 @@ const server = Bun.serve<WsData>({
       }
     },
 
-    message(ws, raw) {
+    async message(ws, raw) {
       const d = ws.data;
 
       if (d.kind === "novnc") {
@@ -447,7 +476,7 @@ const server = Bun.serve<WsData>({
             const text = String(m.text ?? "");
             if (text.trim()) {
               try {
-                const q = enqueueSay(d.paneId, who, text);
+                const q = enqueueSay(d.paneId, who, text, await attrFmtFor(d.paneId));
                 ws.send(JSON.stringify({ type: "_queued", id: q.id, state: q.state }));
               } catch (e) {
                 ws.send(JSON.stringify({
@@ -783,7 +812,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         if (typeof pane_id !== "string" || typeof text !== "string" || !text.trim()) {
           return Response.json({ error: "pane_id and non-empty text required" }, { status: 400 });
         }
-        const m = enqueueSay(pane_id, u.name, text);
+        const m = enqueueSay(pane_id, u.name, text, await attrFmtFor(pane_id));
         return Response.json({ queued: m.id, state: m.state, pending: pendingFor(pane_id).length });
       }
 

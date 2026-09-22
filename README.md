@@ -160,6 +160,34 @@ bun tools/handshake.ts --sock <path>   # direct, skips discovery
 
 ## Embedded views (off by default)
 
+### Who sent a message: attribution
+
+On the protocol path (`herdr-agent-stream/1`) the author is already a field —
+`{"type":"say","author":"alice","text":"…"}` — and the message is untouched.
+
+On the keystroke path there is no out-of-band channel: the pane receives typed
+characters and nothing else. So the author has to live in the line, and the only
+question is whether it corrupts the message. An agent chooses by advertising a
+pane token, the same way it advertises a stream socket or an embedded view:
+
+```
+herdr pane report-metadata <pane> --source <you> --token attr_fmt=json1 --ttl-ms 600000
+```
+
+| advertised   | what the pane receives                              |
+|--------------|-----------------------------------------------------|
+| `attr_fmt=json1` | `{"herdr":1,"from":"alice","text":"the message"}` |
+| nothing      | `alice: the message` (legacy prefix)                  |
+| `attr_fmt=none`  | `the message`                                    |
+
+`json1` is opt-in for a reason: an agent that does not understand the envelope
+would read JSON where a sentence should be. The legacy prefix is readable by
+anything, but it *mangles* the message — the agent cannot separate attribution
+from content, and anything parsing its own input sees a corrupted first line.
+
+`HERDR_WEB_ATTRIBUTION` overrides the whole negotiation: `auto` (default),
+`json`, `prefix`, `none`.
+
 ### Putting it on the internet: `tools/expose.sh`
 
 ```
