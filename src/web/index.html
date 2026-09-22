@@ -331,6 +331,11 @@
     border-radius:4px;color:#e8c9a6;background:rgba(0,0,0,.25);border:1px solid #5c4a1c}
   #framebar button:hover{color:#fff;border-color:#e8c9a6}
 
+  /* A finished turn is not the same as a pane that never started one. */
+  .dot.done{background:#7aa2f7}
+  .item.done .nm{color:var(--fg)}
+  .card.done{border-color:#2e3b57}
+
   .loadmore{display:flex;justify-content:center;padding:6px 0 8px}
   .loadmore button{font:inherit;font-size:11px;padding:3px 10px;cursor:pointer;
     color:var(--dim);background:var(--card);border:1px solid var(--line);border-radius:3px}

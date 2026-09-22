@@ -11,7 +11,7 @@
  */
 import { call, subscribe } from "./herdr-socket.ts";
 
-export type Status = "blocked" | "working" | "idle" | "unknown";
+export type Status = "blocked" | "working" | "done" | "idle" | "unknown";
 
 /** Triage order: who needs a human first. */
 export const STATUS_RANK: Record<string, number> = {
@@ -103,7 +103,14 @@ function agentTask(p: any, label?: string): string | undefined {
 }
 
 function normStatus(s: unknown): Status {
-  return s === "blocked" || s === "working" || s === "idle" ? s : "unknown";
+  // "done" is a real herdr state — a finished turn waiting at the prompt — and
+  // it is common: a third of the fleet sits in it at any moment. Folding it into
+  // "unknown" made a finished session indistinguishable from a pane running no
+  // agent at all, and it cost a wrong diagnosis once, when herdr and the fleet
+  // appeared to disagree about the same pane and the disagreement was this.
+  return s === "blocked" || s === "working" || s === "done" || s === "idle"
+    ? s
+    : "unknown";
 }
 
 /**
@@ -234,8 +241,6 @@ export function onFleet(fn: (f: FleetEntry[]) => void): () => void {
 
 /** Starts the resident tracker. Returns a stop function. */
 export function startFleetTracker(): () => void {
-  refresh().catch((e) => console.error("fleet: initial refresh failed:", e.message));
-
   const types = [
     "pane.created", "pane.closed", "pane.updated", "pane.focused",
     "pane.exited", "pane.agent_detected",
@@ -258,7 +263,14 @@ export function startFleetTracker(): () => void {
       },
     );
   };
+
+  // Subscribe BEFORE taking the first snapshot. herdr 0.9.0 (#1270) stopped
+  // replaying history on subscription, so anything that happened between a
+  // snapshot and a later subscribe is simply lost. Ordering it this way costs
+  // nothing — an event arriving early just schedules a refresh that was going
+  // to happen anyway — and removes the race before the server is upgraded.
   connect();
+  refresh().catch((e) => console.error("fleet: initial refresh failed:", e.message));
 
   // Safety net: herdr emits no event for a status that changes without a
   // lifecycle transition, so poll slowly as a floor.

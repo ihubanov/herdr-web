@@ -28,8 +28,8 @@ const el = {
   sound: $("sound"), help: $("help"), helpbox: $("helpbox"), badge: $("blockedbadge"),
 };
 
-const RANK = { blocked: 0, working: 1, idle: 2, unknown: 3 };
-const LABEL = { blocked: "Blocked", working: "Working", idle: "Idle", unknown: "Other" };
+const RANK = { blocked: 0, working: 1, done: 2, idle: 3, unknown: 4 };
+const LABEL = { blocked: "Blocked", working: "Working", done: "Done", idle: "Idle", unknown: "Other" };
 const PRESETS = [
   { key: "1", label: "yes", text: "yes" },
   { key: "2", label: "continue", text: "continue" },
