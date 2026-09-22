@@ -87,10 +87,14 @@ export type AttrFmt = "json1" | "prefix" | "none";
  * characters and nothing else. So attribution has to live IN the line, and the
  * only question is whether it corrupts the message.
  *
- *  json1   {"herdr":1,"from":"alice","text":"…"} — the author is a field, the
- *          message is untouched, and a harness can unwrap it exactly. Only sent
- *          to panes that have ASKED for it, because an agent that does not
- *          understand the envelope would read JSON where a sentence should be.
+ *  json1   {"herdr":1,"author":"alice","text":"…"} — the author is its own field,
+ *          the message is untouched, and a harness can unwrap it exactly. The
+ *          key is "author" because herdr-agent-stream/1 already calls it that;
+ *          two transports carrying the same fact should not disagree about its
+ *          name. Only sent to panes that have ASKED for it, because an agent
+ *          that does not understand the envelope would read JSON where a
+ *          sentence should be — and note the key is for the HARNESS, not the
+ *          model: unwrapped, the model never sees it, which is the point.
  *  prefix  "alice: …" — legacy. Readable by any agent, but it mangles the
  *          message: the agent cannot tell the attribution from the content, and
  *          anything that parses its own input sees a corrupted first line.
@@ -98,7 +102,7 @@ export type AttrFmt = "json1" | "prefix" | "none";
  */
 function wrap(author: string, text: string, fmt: AttrFmt): string {
   if (!author || fmt === "none") return text;
-  if (fmt === "json1") return JSON.stringify({ herdr: 1, from: author, text });
+  if (fmt === "json1") return JSON.stringify({ herdr: 1, author, text });
   return `${author}: ${text}`;
 }
 

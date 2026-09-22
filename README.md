@@ -176,7 +176,7 @@ herdr pane report-metadata <pane> --source <you> --token attr_fmt=json1 --ttl-ms
 
 | advertised   | what the pane receives                              |
 |--------------|-----------------------------------------------------|
-| `attr_fmt=json1` | `{"herdr":1,"from":"alice","text":"the message"}` |
+| `attr_fmt=json1` | `{"herdr":1,"author":"alice","text":"the message"}` |
 | nothing      | `alice: the message` (legacy prefix)                  |
 | `attr_fmt=none`  | `the message`                                    |
 
