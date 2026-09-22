@@ -160,6 +160,28 @@ bun tools/handshake.ts --sock <path>   # direct, skips discovery
 
 ## Embedded views (off by default)
 
+### Putting it on the internet: `tools/expose.sh`
+
+```
+tools/expose.sh [--ttl-hours N] [--label TEXT]
+```
+
+A Cloudflare Quick Tunnel: a random `*.trycloudflare.com` hostname, no account,
+no API token, no DNS of your own. Ctrl-C ends it.
+
+**Understand what this grants.** herdr-web drives your terminal panes, so anyone
+who reaches it with a valid token can type into your shells — remote code
+execution on that machine, as you. The token is in the URL, so *the URL is the
+credential*: a screenshot or a pasted link is enough to hand it over.
+
+Two things shrink the blast radius, and neither removes it. The tunnel gets an
+**ephemeral** token, not your admin one — it expires on its own and is revoked
+when the script exits, so the link dies with it. And that token is not admin, so
+a guest cannot close panes, disconnect viewers or remove worktrees.
+
+`cloudflared` is a Go binary and must be installed; there is no Python or JS
+package that replaces it (the PyPI wrapper downloads the same binary).
+
 ### Showing something to the user: `tools/herdr-share.sh`
 
 From inside a herdr pane an agent can put a page on the user's screen:

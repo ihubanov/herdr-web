@@ -52,6 +52,14 @@ export class Identity {
   /** True when named users are configured; otherwise single-operator mode. */
   readonly multiuser: boolean;
 
+  /**
+   * Short-lived tokens, for handing access to something that should not hold a
+   * permanent credential — a public tunnel above all. The admin token is the
+   * keys to the machine and must never travel over one; these expire on their
+   * own, and are revoked the moment the thing that asked for them stops.
+   */
+  private readonly ephemeral = new Map<string, { label: string; expires: number }>();
+
   constructor(spec = process.env.HERDR_WEB_USERS, adminToken = process.env.HERDR_WEB_TOKEN) {
     this.users = parseUsers(spec);
     this.adminToken = adminToken || randomBytes(24).toString("hex");
@@ -62,10 +70,34 @@ export class Identity {
   resolve(token: string | null | undefined): User | null {
     if (!token) return null;
     if (eq(token, this.adminToken)) return { name: "admin", isAdmin: true };
+    // Ephemeral tokens are NOT admin: a tunnel guest should not be able to
+    // close panes or disconnect other viewers.
+    for (const [tok, meta] of this.ephemeral) {
+      if (meta.expires <= Date.now()) { this.ephemeral.delete(tok); continue; }
+      if (eq(token, tok)) return { name: meta.label, isAdmin: false };
+    }
     for (const [name, tok] of this.users) {
       if (eq(token, tok)) return { name, isAdmin: false };
     }
     return null;
+  }
+
+  /** Mint a token that dies on its own. Returns the token and when it expires. */
+  mintEphemeral(label: string, ttlMs: number): { token: string; expires: number } {
+    for (const [tok, m] of this.ephemeral) if (m.expires <= Date.now()) this.ephemeral.delete(tok);
+    const token = randomBytes(24).toString("hex");
+    const expires = Date.now() + Math.min(Math.max(60_000, ttlMs), 24 * 3600_000);
+    this.ephemeral.set(token, { label: label.slice(0, 40) || "guest", expires });
+    return { token, expires };
+  }
+
+  revokeEphemeral(token: string): boolean {
+    return this.ephemeral.delete(token);
+  }
+
+  ephemeralCount(): number {
+    for (const [tok, m] of this.ephemeral) if (m.expires <= Date.now()) this.ephemeral.delete(tok);
+    return this.ephemeral.size;
   }
 
   /** Display label for a resolved user. */

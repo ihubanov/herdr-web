@@ -294,6 +294,227 @@ const server = Bun.serve<WsData>({
   port: PORT,
 
   async fetch(req, srv) {
+    // Every response gets these, rather than each handler remembering to.
+    // Referrer-Policy matters most: the token lives in the query string, so any
+    // outbound navigation carrying a Referer would hand the URL — and with it
+    // control of this machine's shells — to a third party. Individual links
+    // already set rel=noreferrer; this covers everything that does not.
+    const res = await handleRequest(req, srv);
+    if (!res) return res as any;
+    try {
+      res.headers.set("referrer-policy", "no-referrer");
+      res.headers.set("x-content-type-options", "nosniff");
+      res.headers.set("x-frame-options", "SAMEORIGIN");
+    } catch { /* some responses have immutable headers; not worth failing over */ }
+    return res;
+  },
+
+  websocket: {
+    open(ws) {
+      const d = ws.data;
+      liveSockets.add(ws);
+      if (d.kind === "events") {
+        // Lifecycle events that matter for a dashboard. Names verified
+        // against the schema's Subscription enum.
+        const types = [
+          "workspace.created", "workspace.updated", "workspace.renamed",
+          "workspace.closed", "workspace.focused",
+          "tab.created", "tab.closed", "tab.renamed", "tab.focused",
+          "pane.created", "pane.closed", "pane.updated", "pane.focused",
+          "pane.exited", "pane.agent_detected",
+          "layout.updated",
+        ];
+        eventClients.add(ws);
+        try { ws.send(JSON.stringify({ event: "presence", data: { presence: presenceSnapshot() } })); } catch {}
+
+        // Push the resident fleet snapshot: initial + on every change.
+        const off = onFleet((fleet) => {
+          try { ws.send(JSON.stringify({ event: "fleet", data: { fleet } })); } catch {}
+        });
+        try { ws.send(JSON.stringify({ event: "fleet", data: { fleet: getFleet() } })); } catch {}
+
+        const unsubEvents = subscribe(
+          types.map((t) => ({ type: t })),
+          (evt) => { try { ws.send(JSON.stringify(evt)); } catch {} },
+          (reason) => {
+            try { ws.send(JSON.stringify({ event: "_bridge_closed", data: { reason } })); } catch {}
+          },
+        );
+        d.unsub = () => { off(); unsubEvents(); };
+        return;
+      }
+
+      // Terminal sessions are NOT spawned here. We wait for the client's
+      // {type:"init",cols,rows,mode} so the PTY opens at the browser's real
+      // geometry and in the mode the user asked for. Spawning at open with a
+      // guessed 120x40 makes the first paint wrap incorrectly.
+      if (d.kind === "stream" && d.paneId) {
+        joinPane(d.paneId, d.who || "operator");
+        void (async () => {
+          const cap = await detectStream(d.paneId!);
+          if (!cap) {
+            // Fall back to the on-disk transcript before giving up.
+            let path: string | null = null, sid = "";
+            try {
+              sid = (await call("pane.get", { pane_id: d.paneId! }))?.pane?.agent_session?.value ?? "";
+              if (sid) path = await findTranscript(sid);
+            } catch { /* pane vanished */ }
+            if (!path) {
+              try { ws.send(JSON.stringify({ type: "_nostream" })); ws.close(1000, "no stream"); } catch {}
+              return;
+            }
+            const t = followTranscript(path, { session: sid });
+            d.tail = t;
+            t.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
+            t.onClose((reason) => {
+              try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
+            });
+            return;
+          }
+          const h = openStream(cap, { fromSeq: 0, client: `herdr-web/${d.who}` });
+          d.stream = h;
+          h.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
+          h.onClose((reason) => {
+            try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
+          });
+        })();
+        return;
+      }
+
+      if (d.kind === "novnc" && d.wsTarget) {
+        // RFB is binary and starts talking immediately, so anything the viewer
+        // sends before the upstream is ready must be held, not dropped — losing
+        // a handshake byte wedges the session with no error anywhere.
+        d.pending = [];
+        const up = new WebSocket(d.wsTarget);
+        up.binaryType = "arraybuffer";
+        d.up = up;
+        up.onopen = () => {
+          for (const m of d.pending ?? []) { try { up.send(m); } catch {} }
+          d.pending = [];
+        };
+        up.onmessage = (ev: any) => {
+          try {
+            ws.send(ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data);
+          } catch {}
+        };
+        up.onclose = () => { try { ws.close(); } catch {} };
+        up.onerror = () => { try { ws.close(1011, "shared display unreachable"); } catch {} };
+        return;
+      }
+
+      if (d.kind === "terminal" && d.paneId) {
+        joinPane(d.paneId, d.who || "operator");
+        ws.send(JSON.stringify({ type: "_ready", you: d.who || "operator" }));
+      }
+    },
+
+    message(ws, raw) {
+      const d = ws.data;
+
+      if (d.kind === "novnc") {
+        const payload = typeof raw === "string" ? raw : new Uint8Array(raw as any);
+        if (d.up && d.up.readyState === 1) { try { d.up.send(payload); } catch {} }
+        else d.pending?.push(payload);
+        return;
+      }
+
+      if (d.kind === "stream") {
+        const txt = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
+        let m: any; try { m = JSON.parse(txt); } catch { return; }
+        // The author is OURS, from the authenticated connection — never the
+        // client's claim (docs/PROTOCOL.md §3).
+        const who = d.who || "operator";
+
+        // A transcript-backed pane has no protocol channel back to the agent —
+        // a file is a record, not a way in. The reply still has to arrive, so it
+        // goes the only way available: as pane input, through the same queue the
+        // REST path uses. Without this the say was silently dropped while the
+        // composer cleared, which looked exactly like a broken send button.
+        if (!d.stream) {
+          if (d.tail && d.paneId && m.type === "say") {
+            const text = String(m.text ?? "");
+            if (text.trim()) {
+              try {
+                const q = enqueueSay(d.paneId, who, text);
+                ws.send(JSON.stringify({ type: "_queued", id: q.id, state: q.state }));
+              } catch (e) {
+                ws.send(JSON.stringify({
+                  type: "_sayfailed",
+                  reason: e instanceof Error ? e.message : String(e),
+                }));
+              }
+            }
+          }
+          return;
+        }
+        if (m.type === "say") d.stream.say(who, String(m.text ?? ""));
+        else if (m.type === "permission_reply")
+          d.stream.permissionReply(String(m.request_id), m.decision === "allow" ? "allow" : "deny", who);
+        else if (m.type === "question_reply")
+          d.stream.questionReply(String(m.request_id), m.answers ?? {}, who, !!m.declined);
+        else if (m.type === "interrupt") d.stream.interrupt(who);
+        return;
+      }
+
+      if (d.kind !== "terminal" || !d.paneId) return;
+
+      const text = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
+
+      // Control frames are JSON; anything else is literal keystrokes.
+      let msg: any = null;
+      if (text.startsWith("{")) { try { msg = JSON.parse(text); } catch { msg = null; } }
+
+      if (msg?.type === "init") {
+        if (d.started) return;
+        d.started = true;
+        const mode: "observe" | "control" = msg.mode === "control" ? "control" : "observe";
+        const session = openTerminalSession({
+          paneId: d.paneId,
+          cols: Number(msg.cols) || 80,
+          rows: Number(msg.rows) || 24,
+          mode,
+          takeover: mode === "control" && msg.takeover !== false,
+        });
+        d.session = session;
+        d.lineHasContent = false;
+        session.onData((bytes) => { try { ws.send(bytes); } catch {} });
+        session.onClose((reason) => {
+          try { ws.send(JSON.stringify({ type: "_closed", reason })); } catch {}
+          try { ws.close(1000, String(reason).slice(0, 120)); } catch {}
+        });
+        try { ws.send(JSON.stringify({ type: "_attached", mode })); } catch {}
+        return;
+      }
+
+      if (!d.session) return; // not initialised yet
+
+      if (msg?.type === "resize") { d.session.resize(msg.cols, msg.rows); return; }
+      if (msg?.type === "scroll") {
+        d.session.scroll(msg.direction === "down" ? "down" : "up", msg.lines ?? 3);
+        return;
+      }
+      if (msg?.type === "input")  { forwardInput(ws, d, msg.text ?? ""); return; }
+
+      forwardInput(ws, d, text);
+    },
+
+    close(ws) {
+      liveSockets.delete(ws);
+      eventClients.delete(ws);
+      ws.data.stream?.close();
+      ws.data.tail?.close();
+      if (ws.data.up) { try { ws.data.up.close(); } catch {} }
+      ws.data.unsub?.();
+      ws.data.session?.release();
+      if ((ws.data.kind === "terminal" || ws.data.kind === "stream") && ws.data.paneId) {
+        leavePane(ws.data.paneId, ws.data.who || "operator");
+      }
+    },
+  },
+});
+
+async function handleRequest(req: Request, srv: any): Promise<Response | undefined> {
     const url = new URL(req.url);
 
     // --- WebSocket upgrades -------------------------------------------------
@@ -626,6 +847,28 @@ const server = Bun.serve<WsData>({
         return Response.json({ error: "action must be claim|release|heartbeat" }, { status: 400 });
       }
 
+      // Ephemeral access, for handing the UI to something that must not hold a
+      // permanent credential — a public tunnel above all.
+      if (url.pathname === "/api/expose-token") {
+        const me = whoami(req);
+        if (!me?.isAdmin) return Response.json({ error: "admin only" }, { status: 403 });
+        if (req.method === "POST") {
+          const b = await req.json().catch(() => ({} as any));
+          const ttl = Number(b?.ttl_ms ?? 8 * 3600_000);
+          const label = typeof b?.label === "string" ? b.label : "tunnel";
+          const t = identity.mintEphemeral(label, ttl);
+          console.log(`[expose] minted an ephemeral token (${label}), expires ${new Date(t.expires).toISOString()}`);
+          return Response.json(t);
+        }
+        if (req.method === "DELETE") {
+          const tok = url.searchParams.get("t") ?? "";
+          const gone = identity.revokeEphemeral(tok);
+          if (gone) console.log("[expose] ephemeral token revoked");
+          return Response.json({ revoked: gone, active: identity.ephemeralCount() });
+        }
+        return new Response("method not allowed", { status: 405 });
+      }
+
       if (url.pathname === "/api/presence") {
         return Response.json({ presence: presenceSnapshot() });
       }
@@ -750,212 +993,8 @@ const server = Bun.serve<WsData>({
         etag,
       },
     });
-  },
+  }
 
-  websocket: {
-    open(ws) {
-      const d = ws.data;
-      liveSockets.add(ws);
-      if (d.kind === "events") {
-        // Lifecycle events that matter for a dashboard. Names verified
-        // against the schema's Subscription enum.
-        const types = [
-          "workspace.created", "workspace.updated", "workspace.renamed",
-          "workspace.closed", "workspace.focused",
-          "tab.created", "tab.closed", "tab.renamed", "tab.focused",
-          "pane.created", "pane.closed", "pane.updated", "pane.focused",
-          "pane.exited", "pane.agent_detected",
-          "layout.updated",
-        ];
-        eventClients.add(ws);
-        try { ws.send(JSON.stringify({ event: "presence", data: { presence: presenceSnapshot() } })); } catch {}
-
-        // Push the resident fleet snapshot: initial + on every change.
-        const off = onFleet((fleet) => {
-          try { ws.send(JSON.stringify({ event: "fleet", data: { fleet } })); } catch {}
-        });
-        try { ws.send(JSON.stringify({ event: "fleet", data: { fleet: getFleet() } })); } catch {}
-
-        const unsubEvents = subscribe(
-          types.map((t) => ({ type: t })),
-          (evt) => { try { ws.send(JSON.stringify(evt)); } catch {} },
-          (reason) => {
-            try { ws.send(JSON.stringify({ event: "_bridge_closed", data: { reason } })); } catch {}
-          },
-        );
-        d.unsub = () => { off(); unsubEvents(); };
-        return;
-      }
-
-      // Terminal sessions are NOT spawned here. We wait for the client's
-      // {type:"init",cols,rows,mode} so the PTY opens at the browser's real
-      // geometry and in the mode the user asked for. Spawning at open with a
-      // guessed 120x40 makes the first paint wrap incorrectly.
-      if (d.kind === "stream" && d.paneId) {
-        joinPane(d.paneId, d.who || "operator");
-        void (async () => {
-          const cap = await detectStream(d.paneId!);
-          if (!cap) {
-            // Fall back to the on-disk transcript before giving up.
-            let path: string | null = null, sid = "";
-            try {
-              sid = (await call("pane.get", { pane_id: d.paneId! }))?.pane?.agent_session?.value ?? "";
-              if (sid) path = await findTranscript(sid);
-            } catch { /* pane vanished */ }
-            if (!path) {
-              try { ws.send(JSON.stringify({ type: "_nostream" })); ws.close(1000, "no stream"); } catch {}
-              return;
-            }
-            const t = followTranscript(path, { session: sid });
-            d.tail = t;
-            t.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
-            t.onClose((reason) => {
-              try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
-            });
-            return;
-          }
-          const h = openStream(cap, { fromSeq: 0, client: `herdr-web/${d.who}` });
-          d.stream = h;
-          h.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
-          h.onClose((reason) => {
-            try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
-          });
-        })();
-        return;
-      }
-
-      if (d.kind === "novnc" && d.wsTarget) {
-        // RFB is binary and starts talking immediately, so anything the viewer
-        // sends before the upstream is ready must be held, not dropped — losing
-        // a handshake byte wedges the session with no error anywhere.
-        d.pending = [];
-        const up = new WebSocket(d.wsTarget);
-        up.binaryType = "arraybuffer";
-        d.up = up;
-        up.onopen = () => {
-          for (const m of d.pending ?? []) { try { up.send(m); } catch {} }
-          d.pending = [];
-        };
-        up.onmessage = (ev: any) => {
-          try {
-            ws.send(ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data);
-          } catch {}
-        };
-        up.onclose = () => { try { ws.close(); } catch {} };
-        up.onerror = () => { try { ws.close(1011, "shared display unreachable"); } catch {} };
-        return;
-      }
-
-      if (d.kind === "terminal" && d.paneId) {
-        joinPane(d.paneId, d.who || "operator");
-        ws.send(JSON.stringify({ type: "_ready", you: d.who || "operator" }));
-      }
-    },
-
-    message(ws, raw) {
-      const d = ws.data;
-
-      if (d.kind === "novnc") {
-        const payload = typeof raw === "string" ? raw : new Uint8Array(raw as any);
-        if (d.up && d.up.readyState === 1) { try { d.up.send(payload); } catch {} }
-        else d.pending?.push(payload);
-        return;
-      }
-
-      if (d.kind === "stream") {
-        const txt = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
-        let m: any; try { m = JSON.parse(txt); } catch { return; }
-        // The author is OURS, from the authenticated connection — never the
-        // client's claim (docs/PROTOCOL.md §3).
-        const who = d.who || "operator";
-
-        // A transcript-backed pane has no protocol channel back to the agent —
-        // a file is a record, not a way in. The reply still has to arrive, so it
-        // goes the only way available: as pane input, through the same queue the
-        // REST path uses. Without this the say was silently dropped while the
-        // composer cleared, which looked exactly like a broken send button.
-        if (!d.stream) {
-          if (d.tail && d.paneId && m.type === "say") {
-            const text = String(m.text ?? "");
-            if (text.trim()) {
-              try {
-                const q = enqueueSay(d.paneId, who, text);
-                ws.send(JSON.stringify({ type: "_queued", id: q.id, state: q.state }));
-              } catch (e) {
-                ws.send(JSON.stringify({
-                  type: "_sayfailed",
-                  reason: e instanceof Error ? e.message : String(e),
-                }));
-              }
-            }
-          }
-          return;
-        }
-        if (m.type === "say") d.stream.say(who, String(m.text ?? ""));
-        else if (m.type === "permission_reply")
-          d.stream.permissionReply(String(m.request_id), m.decision === "allow" ? "allow" : "deny", who);
-        else if (m.type === "question_reply")
-          d.stream.questionReply(String(m.request_id), m.answers ?? {}, who, !!m.declined);
-        else if (m.type === "interrupt") d.stream.interrupt(who);
-        return;
-      }
-
-      if (d.kind !== "terminal" || !d.paneId) return;
-
-      const text = typeof raw === "string" ? raw : Buffer.from(raw as any).toString("utf8");
-
-      // Control frames are JSON; anything else is literal keystrokes.
-      let msg: any = null;
-      if (text.startsWith("{")) { try { msg = JSON.parse(text); } catch { msg = null; } }
-
-      if (msg?.type === "init") {
-        if (d.started) return;
-        d.started = true;
-        const mode: "observe" | "control" = msg.mode === "control" ? "control" : "observe";
-        const session = openTerminalSession({
-          paneId: d.paneId,
-          cols: Number(msg.cols) || 80,
-          rows: Number(msg.rows) || 24,
-          mode,
-          takeover: mode === "control" && msg.takeover !== false,
-        });
-        d.session = session;
-        d.lineHasContent = false;
-        session.onData((bytes) => { try { ws.send(bytes); } catch {} });
-        session.onClose((reason) => {
-          try { ws.send(JSON.stringify({ type: "_closed", reason })); } catch {}
-          try { ws.close(1000, String(reason).slice(0, 120)); } catch {}
-        });
-        try { ws.send(JSON.stringify({ type: "_attached", mode })); } catch {}
-        return;
-      }
-
-      if (!d.session) return; // not initialised yet
-
-      if (msg?.type === "resize") { d.session.resize(msg.cols, msg.rows); return; }
-      if (msg?.type === "scroll") {
-        d.session.scroll(msg.direction === "down" ? "down" : "up", msg.lines ?? 3);
-        return;
-      }
-      if (msg?.type === "input")  { forwardInput(ws, d, msg.text ?? ""); return; }
-
-      forwardInput(ws, d, text);
-    },
-
-    close(ws) {
-      liveSockets.delete(ws);
-      eventClients.delete(ws);
-      ws.data.stream?.close();
-      ws.data.tail?.close();
-      if (ws.data.up) { try { ws.data.up.close(); } catch {} }
-      ws.data.unsub?.();
-      ws.data.session?.release();
-      if ((ws.data.kind === "terminal" || ws.data.kind === "stream") && ws.data.paneId) {
-        leavePane(ws.data.paneId, ws.data.who || "operator");
-      }
-    },
-  },
-});
 
 console.log(`
   herdr-web bridge
