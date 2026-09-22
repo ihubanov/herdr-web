@@ -420,6 +420,58 @@
   #helpbox dl{display:grid;grid-template-columns:auto 1fr;gap:7px 16px;margin:0;font-size:12.5px}
   #helpbox dt{color:var(--blocked);font-family:ui-monospace,monospace;font-weight:600}
   #helpbox dd{margin:0;color:var(--dim)}
+  /* ======================= narrow screens =======================
+     Below this width the three-column grid stops working: an 18% sidebar on a
+     390px phone spends a third of the screen on the pane list before anything
+     useful. So the sidebar stops being a COLUMN and becomes an overlay drawer
+     over the content, and the grid collapses to a single column.
+
+     The toggle and its keyboard shortcut already existed; what was missing was
+     anything that changed behaviour by screen size — the whole stylesheet had
+     one @media rule and it was prefers-reduced-motion. */
+  @media (max-width: 760px) {
+    body{grid-template-columns:1fr;grid-template-areas:"head" "main";
+      transition:none}
+    #divider{display:none}
+
+    aside{position:fixed;z-index:60;top:44px;bottom:0;left:0;
+      width:min(80vw,300px);grid-area:unset;
+      border-right:1px solid var(--line);background:var(--panel);
+      transform:translateX(-102%);transition:transform .18s ease;
+      will-change:transform}
+    body.drawer aside{transform:translateX(0)}
+    /* The scrim is the affordance that says "tap anywhere to dismiss"; without
+       it a drawer over a live terminal reads as a broken layout. */
+    #drawerscrim{display:none;position:fixed;inset:44px 0 0 0;z-index:59;
+      background:rgba(6,8,12,.5)}
+    body.drawer #drawerscrim{display:block}
+
+    main{grid-area:main;min-width:0}
+
+    /* Toolbars wrap instead of pushing controls off the edge. */
+    header{gap:6px;padding:0 8px;overflow-x:auto;scrollbar-width:none}
+    header::-webkit-scrollbar{display:none}
+    #ctl{flex-wrap:wrap;row-gap:4px}
+    #framebar{flex-wrap:wrap;row-gap:4px}
+    #lockstate{margin-left:0}
+
+    /* Touch targets. 4px of padding is a mouse target, not a finger. */
+    .icon,#ctl button,#framebar button,.loadmore button,#cclip,#cgo{
+      min-height:34px;padding-top:7px;padding-bottom:7px}
+    .clamptog{min-height:26px}
+
+    /* The chat badge column is sized to the widest name; on a phone that is
+       width the message needs more. */
+    #msgs .msg{grid-template-columns:minmax(0,64px) 1fr;gap:6px;padding:1px 8px}
+    .md{font-size:14px}          /* iOS zooms anything under 16px on focus… */
+    #cin{font-size:16px}         /* …so the composer must not trigger it */
+
+    /* The embedded view is a modal; on a phone it should use the whole screen. */
+    #frameview{inset:0;border-radius:0;border:0}
+
+    #modal .box{width:min(94vw,520px);max-height:86vh;overflow-y:auto}
+  }
+
 </style>
 </head>
 <body>
@@ -436,6 +488,7 @@
     <div id="conn" class="down">connecting</div>
   </header>
 
+  <div id="drawerscrim"></div>
   <aside>
     <div class="sb-tools">
       <input id="search" placeholder="filter…" />

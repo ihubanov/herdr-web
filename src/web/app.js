@@ -21,7 +21,7 @@ const el = {
   framescrim: $("framescrim"), frameclose: $("frameclose"),
   frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
-  divider: $("divider"), toggleside: $("toggleside"), fleetbtn: $("fleetbtn"), triage: $("triage"),
+  divider: $("divider"), toggleside: $("toggleside"), drawerscrim: $("drawerscrim"), fleetbtn: $("fleetbtn"), triage: $("triage"),
   newspace: $("newspace"), modal: $("modal"), mtitle: $("mtitle"), msub: $("msub"),
   mfields: $("mfields"), merr: $("merr"), mok: $("mok"), mcancel: $("mcancel"),
   me: $("me"), roster: $("roster"), chatq: $("chatq"),
@@ -380,13 +380,55 @@ function applySidebarWidth(pct, persist = true) {
   el.divider.addEventListener("dblclick", () => { applySidebarWidth(SIDEBAR_DEFAULT_PCT); refit(); });
 })();
 
+/**
+ * Narrow screens use a DRAWER, wide screens a collapsing column.
+ *
+ * Same button, same `b` shortcut, different meaning by width — because on a
+ * phone the sidebar cannot be a grid column at all: 18% of 390px is a third of
+ * the screen spent on the pane list before anything useful. The breakpoint
+ * matches the stylesheet's; keeping the number in both places is the price of
+ * not shipping a CSS-in-JS layer for one rule.
+ */
+const NARROW = "(max-width: 760px)";
+const isNarrow = () => window.matchMedia(NARROW).matches;
+
 function setSidebar(hidden) {
+  if (isNarrow()) { setDrawer(!hidden); return; }
   sidebarHidden = hidden;
   LS.set("sidebarHidden", hidden);
   document.body.classList.toggle("collapsed", hidden);
   setTimeout(refit, 180);
 }
-el.toggleside.onclick = () => setSidebar(!sidebarHidden);
+
+/** Drawer state is deliberately NOT persisted: it is a transient overlay. */
+function setDrawer(open) {
+  document.body.classList.toggle("drawer", open);
+  setTimeout(refit, 200);
+}
+
+el.toggleside.onclick = () => {
+  if (isNarrow()) setDrawer(!document.body.classList.contains("drawer"));
+  else setSidebar(!sidebarHidden);
+};
+el.drawerscrim.onclick = () => setDrawer(false);
+
+// Picking a pane is the end of what the drawer is for, so it gets out of the
+// way — otherwise every selection needs a second tap to see the result.
+el.fleet.addEventListener("click", () => { if (isNarrow()) setDrawer(false); }, true);
+document.querySelector("aside")?.addEventListener("click", (e) => {
+  if (isNarrow() && e.target.closest(".item")) setDrawer(false);
+}, true);
+
+// Crossing the breakpoint must not leave a drawer open over a desktop layout,
+// or a collapsed column that the drawer toggle can no longer reveal.
+window.matchMedia(NARROW).addEventListener("change", (m) => {
+  if (m.matches) document.body.classList.remove("collapsed");
+  else {
+    setDrawer(false);
+    document.body.classList.toggle("collapsed", sidebarHidden);
+  }
+  setTimeout(refit, 200);
+});
 el.fleetbtn.onclick = toggleView;
 el.framebtn.onclick = () => {
   if (view === "frame") { dismissFrame(); }
@@ -1010,6 +1052,9 @@ addEventListener("keydown", (e) => {
   const inField = /^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || "");
   const inTerm = !!document.activeElement?.closest("#term");
 
+  if (e.key === "Escape" && document.body.classList.contains("drawer")) {
+    setDrawer(false); e.preventDefault(); return;
+  }
   if (e.key === "Escape") {
     if (el.modal.classList.contains("on")) return closeModal();
     if (el.helpbox.classList.contains("on")) return el.helpbox.classList.remove("on");
