@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # expose.sh — put this herdr-web on the internet, briefly, with no account.
 #
-#   tools/expose.sh [--ttl-hours N] [--label TEXT]
+#   tools/expose.sh [--ttl-minutes N | --ttl-hours N] [--label TEXT] [--no-pin]
 #
 # Uses a Cloudflare Quick Tunnel: a random *.trycloudflare.com hostname, no
 # Cloudflare account, no API token, no DNS of your own. Ctrl-C ends it.
@@ -27,12 +27,16 @@
 # token a prober gets 401 — but assume the endpoint WILL be found.
 set -euo pipefail
 
-TTL_HOURS=8
+# Minutes, not hours. A link that grants shell access should outlive the task
+# and nothing more; anything still open an hour later is an oversight, not a
+# requirement. --ttl-hours remains for the rare long session.
+TTL_MIN=15
 LABEL="tunnel"
 PIN=true
 while [ $# -gt 0 ]; do
   case "$1" in
-    --ttl-hours) TTL_HOURS="$2"; shift 2;;
+    --ttl-minutes) TTL_MIN="$2"; shift 2;;
+    --ttl-hours)   TTL_MIN=$(( $2 * 60 )); shift 2;;
     --label)     LABEL="$2"; shift 2;;
     --no-pin)    PIN=false; shift;;
     -h|--help)   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
@@ -72,7 +76,7 @@ curl -sS -m 4 -o /dev/null "${WEB}/api/viewing?pane_id=x" 2>/dev/null || {
 
 # Mint the ephemeral token FIRST: if this fails there is no point opening a hole.
 MINT="$(curl -sS -m 5 -X POST -H 'content-type: application/json' \
-  -d "{\"ttl_ms\":$((TTL_HOURS*3600000)),\"label\":\"${LABEL//\"/}\",\"pin\":${PIN}}" \
+  -d "{\"ttl_ms\":$((TTL_MIN*60000)),\"label\":\"${LABEL//\"/}\",\"pin\":${PIN}}" \
   "${WEB}/api/expose-token?token=${ADMIN}")" || { echo "expose: could not mint a token" >&2; exit 6; }
 GUEST="$(printf '%s' "$MINT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
 [ -n "$GUEST" ] || { echo "expose: mint failed: $MINT" >&2; exit 6; }
@@ -106,7 +110,7 @@ cat <<EOS
   ${URL}/?token=${GUEST}
 
   This link grants control of your terminal panes to anyone who opens it.
-  Treat it as a password. It expires in ${TTL_HOURS}h, and dies when you Ctrl-C here.
+  Treat it as a password. It expires in ${TTL_MIN} min, and dies when you Ctrl-C here.
   The guest is NOT admin: no closing panes, no disconnecting others.
 $([ "$PIN" = true ] && echo "  The FIRST device to open it claims it; later openers are refused." || echo "  --no-pin: any number of devices may use this link.")
 
