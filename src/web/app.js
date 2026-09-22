@@ -278,7 +278,7 @@ function attach(f, mode = "observe") {
       el.tstatus.textContent = `closed: ${m.reason}`;
     }
   };
-  ws.onclose = () => renderCtl();
+  ws.onclose = (e) => { if (e?.code === 4001) return sessionEnded(e.reason); renderCtl(); };
   ws.onerror = () => { el.tstatus.textContent = "socket error"; };
 }
 
@@ -1253,7 +1253,10 @@ function openChat(paneId) {
     let f; try { f = JSON.parse(e.data); } catch { return; }
     handleFrame(f);
   };
-  ws.onclose = () => { if (view === "chat") appendSys("stream closed"); };
+  ws.onclose = (e) => {
+    if (e?.code === 4001) return sessionEnded(e.reason);
+    if (view === "chat") appendSys("stream closed");
+  };
   ws.onerror = () => appendSys("stream error");
 }
 
@@ -1270,6 +1273,27 @@ function appendSys(text) {
   d.textContent = text;
   el.msgs.appendChild(d);
   scrollMsgs();
+}
+
+/**
+ * The server cut us off — the link was revoked or expired. Say so plainly and
+ * stop: silently reconnecting against a dead token just spins, and leaving the
+ * last frame on screen makes a revoked session look live.
+ */
+let ended = false;
+function sessionEnded(reason) {
+  if (ended) return;
+  ended = true;
+  try { streamSock?.close(); } catch {}
+  try { termSock?.close(); } catch {}
+  streamSock = null; termSock = null;
+  const veil = document.createElement("div");
+  veil.style.cssText = "position:fixed;inset:0;z-index:999;display:grid;place-items:center;" +
+    "background:rgba(6,8,12,.92);color:#e8e8ea;font:15px/1.6 system-ui,sans-serif;text-align:center;padding:24px";
+  veil.innerHTML = `<div><div style="font-size:19px;margin-bottom:8px">Session ended</div>` +
+    `<div style="color:#8b93a7">${esc(reason || "this link is no longer valid")}.</div>` +
+    `<div style="color:#8b93a7;margin-top:10px;font-size:13px">Ask for a new link to reconnect.</div></div>`;
+  document.body.appendChild(veil);
 }
 
 function scrollMsgs() { el.msgs.scrollTop = el.msgs.scrollHeight; }

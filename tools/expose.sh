@@ -14,8 +14,12 @@
 # pasted link, or synced browser history is enough to hand it over.
 #
 # Two things reduce the blast radius, and neither removes it:
+#   * the link is CLAIMED BY THE FIRST DEVICE that opens it. A second opener is
+#     refused even holding the same token, so a leaked URL is useless once used.
+#     Pass --no-pin if you genuinely need several devices on one link.
 #   * the tunnel gets an EPHEMERAL token, not your admin one. It expires on its
-#     own and is revoked when this script exits, so the link dies with it.
+#     own and is revoked when this script exits — and revoking CUTS the live
+#     connection, it does not merely block the next request.
 #   * that token is not admin, so a guest cannot close panes, disconnect other
 #     viewers, or destroy worktrees.
 #
@@ -25,10 +29,12 @@ set -euo pipefail
 
 TTL_HOURS=8
 LABEL="tunnel"
+PIN=true
 while [ $# -gt 0 ]; do
   case "$1" in
     --ttl-hours) TTL_HOURS="$2"; shift 2;;
     --label)     LABEL="$2"; shift 2;;
+    --no-pin)    PIN=false; shift;;
     -h|--help)   sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "expose: unknown argument $1" >&2; exit 2;;
   esac
@@ -66,7 +72,7 @@ curl -sS -m 4 -o /dev/null "${WEB}/api/viewing?pane_id=x" 2>/dev/null || {
 
 # Mint the ephemeral token FIRST: if this fails there is no point opening a hole.
 MINT="$(curl -sS -m 5 -X POST -H 'content-type: application/json' \
-  -d "{\"ttl_ms\":$((TTL_HOURS*3600000)),\"label\":\"${LABEL//\"/}\"}" \
+  -d "{\"ttl_ms\":$((TTL_HOURS*3600000)),\"label\":\"${LABEL//\"/}\",\"pin\":${PIN}}" \
   "${WEB}/api/expose-token?token=${ADMIN}")" || { echo "expose: could not mint a token" >&2; exit 6; }
 GUEST="$(printf '%s' "$MINT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
 [ -n "$GUEST" ] || { echo "expose: mint failed: $MINT" >&2; exit 6; }
@@ -102,6 +108,7 @@ cat <<EOS
   This link grants control of your terminal panes to anyone who opens it.
   Treat it as a password. It expires in ${TTL_HOURS}h, and dies when you Ctrl-C here.
   The guest is NOT admin: no closing panes, no disconnecting others.
+$([ "$PIN" = true ] && echo "  The FIRST device to open it claims it; later openers are refused." || echo "  --no-pin: any number of devices may use this link.")
 
 EOS
 wait "$CF_PID"

@@ -58,7 +58,14 @@ export class Identity {
    * keys to the machine and must never travel over one; these expire on their
    * own, and are revoked the moment the thing that asked for them stops.
    */
-  private readonly ephemeral = new Map<string, { label: string; expires: number }>();
+  private readonly ephemeral = new Map<string, {
+    label: string;
+    expires: number;
+    /** Claim-on-first-use: the token binds to whoever opens it first. */
+    pin: boolean;
+    /** Secret handed to the first claimant; null until claimed. */
+    bound: string | null;
+  }>();
 
   constructor(spec = process.env.HERDR_WEB_USERS, adminToken = process.env.HERDR_WEB_TOKEN) {
     this.users = parseUsers(spec);
@@ -83,12 +90,31 @@ export class Identity {
   }
 
   /** Mint a token that dies on its own. Returns the token and when it expires. */
-  mintEphemeral(label: string, ttlMs: number): { token: string; expires: number } {
+  mintEphemeral(label: string, ttlMs: number, pin = false): { token: string; expires: number; pin: boolean } {
     for (const [tok, m] of this.ephemeral) if (m.expires <= Date.now()) this.ephemeral.delete(tok);
     const token = randomBytes(24).toString("hex");
     const expires = Date.now() + Math.min(Math.max(60_000, ttlMs), 24 * 3600_000);
-    this.ephemeral.set(token, { label: label.slice(0, 40) || "guest", expires });
-    return { token, expires };
+    this.ephemeral.set(token, { label: label.slice(0, 40) || "guest", expires, pin, bound: null });
+    return { token, expires, pin };
+  }
+
+  /** Is this a pinned token, and has it been claimed yet? */
+  pinState(token: string): { pinned: boolean; bound: string | null } | null {
+    const m = this.ephemeral.get(token);
+    if (!m || m.expires <= Date.now()) return null;
+    return { pinned: m.pin, bound: m.bound };
+  }
+
+  /**
+   * Claim a pinned token. Returns the secret to hand the claimant, or null if
+   * somebody already claimed it — which is the whole point: the second opener
+   * is refused even though they hold a valid token.
+   */
+  claimEphemeral(token: string): string | null {
+    const m = this.ephemeral.get(token);
+    if (!m || m.expires <= Date.now() || !m.pin || m.bound) return null;
+    m.bound = randomBytes(18).toString("hex");
+    return m.bound;
   }
 
   revokeEphemeral(token: string): boolean {

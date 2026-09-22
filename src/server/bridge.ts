@@ -232,6 +232,8 @@ interface WsData {
   stream?: StreamHandle;
   /** Transcript follower, for agents with no live protocol socket. */
   tail?: TranscriptHandle;
+  /** The token this socket authenticated with, so it can be cut off later. */
+  authTok?: string;
   /** Upstream websockify socket, for a proxied shared display. */
   up?: WebSocket;
   wsTarget?: string;
@@ -294,6 +296,14 @@ const server = Bun.serve<WsData>({
   port: PORT,
 
   async fetch(req, srv) {
+    // Claim-on-first-use, enforced before routing so it covers websockets too.
+    const pin = pinGate(req);
+    if (pin.deny) {
+      return new Response(JSON.stringify({ error: "this link has already been claimed" }), {
+        status: 401,
+        headers: { "content-type": "application/json", "referrer-policy": "no-referrer" },
+      });
+    }
     // Every response gets these, rather than each handler remembering to.
     // Referrer-Policy matters most: the token lives in the query string, so any
     // outbound navigation carrying a Referer would hand the URL — and with it
@@ -305,6 +315,7 @@ const server = Bun.serve<WsData>({
       res.headers.set("referrer-policy", "no-referrer");
       res.headers.set("x-content-type-options", "nosniff");
       res.headers.set("x-frame-options", "SAMEORIGIN");
+      if (pin.setCookie) res.headers.append("set-cookie", pin.setCookie);
     } catch { /* some responses have immutable headers; not worth failing over */ }
     return res;
   },
@@ -514,6 +525,75 @@ const server = Bun.serve<WsData>({
   },
 });
 
+function tokenOf(req: Request): string {
+  return new URL(req.url).searchParams.get("token") || req.headers.get("x-herdr-token") || "";
+}
+
+/**
+ * Cut off every live socket holding a token that no longer resolves.
+ *
+ * Without this, revoking a link only stops the NEXT request — an already-open
+ * terminal or chat socket keeps streaming, so the device you meant to cut off
+ * carries on watching, and typing, indefinitely. Revocation that leaves the
+ * existing connection alive is not revocation.
+ *
+ * 4001 is a private close code the client recognises so it can say what
+ * happened and stop trying to reconnect.
+ */
+function evictRevoked(reason = "link revoked"): number {
+  let n = 0;
+  for (const ws of liveSockets) {
+    const tok = (ws as any)?.data?.authTok;
+    if (!tok) continue;
+    if (identity.resolve(tok)) continue;
+    try { (ws as any).close(4001, reason); } catch {}
+    n++;
+  }
+  if (n) console.log(`[expose] evicted ${n} live connection(s) on a dead token`);
+  return n;
+}
+
+// Expiry is silent by nature, so sweep for it rather than waiting for traffic.
+setInterval(() => evictRevoked("link expired"), 15_000);
+
+const PIN_COOKIE = "hw_claim";
+
+/**
+ * A pinned token belongs to whoever opens it first; everyone else is refused,
+ * even holding the same token. The claimant is remembered with an HttpOnly
+ * cookie, so a leaked URL is useless once it has been used.
+ *
+ * The claim is taken on the first authenticated API request, NOT on the HTML.
+ * Link previews matter here: paste the URL into a chat app and its crawler
+ * fetches the page, which would otherwise burn the link before the human ever
+ * taps it. A crawler does not run the app's JS, so it never reaches /api.
+ */
+function pinGate(req: Request): { deny: boolean; setCookie?: string } {
+  const url = new URL(req.url);
+  const token = url.searchParams.get("token") || req.headers.get("x-herdr-token");
+  if (!token) return { deny: false };
+  const st = identity.pinState(token);
+  if (!st || !st.pinned) return { deny: false };
+
+  const cookies = req.headers.get("cookie") ?? "";
+  const mine = cookies.split(";")
+    .map((c) => c.trim().split("="))
+    .find(([k]) => k === PIN_COOKIE)?.[1];
+
+  if (st.bound) return { deny: mine !== st.bound };
+
+  // Unclaimed. Only an API call (or a websocket) claims it.
+  const claimable = url.pathname.startsWith("/api/") || url.pathname.startsWith("/ws/");
+  if (!claimable) return { deny: false };
+  const secret = identity.claimEphemeral(token);
+  if (!secret) return { deny: true };          // lost a race to a concurrent claim
+  console.log(`[expose] link claimed — further openers will be refused`);
+  return {
+    deny: false,
+    setCookie: `${PIN_COOKIE}=${secret}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
+  };
+}
+
 async function handleRequest(req: Request, srv: any): Promise<Response | undefined> {
     const url = new URL(req.url);
 
@@ -521,14 +601,14 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
     if (url.pathname === "/ws/events") {
       const u = whoami(req);
       if (!u) return new Response("unauthorized", { status: 401 });
-      if (srv.upgrade(req, { data: { kind: "events", who: Identity.label(u) } })) return undefined as any;
+      if (srv.upgrade(req, { data: { kind: "events", who: Identity.label(u), authTok: tokenOf(req) } })) return undefined as any;
       return new Response("upgrade failed", { status: 400 });
     }
     if (url.pathname.startsWith("/ws/stream/")) {
       const u = whoami(req);
       if (!u) return new Response("unauthorized", { status: 401 });
       const paneId = decodeURIComponent(url.pathname.slice("/ws/stream/".length));
-      if (srv.upgrade(req, { data: { kind: "stream", paneId, who: Identity.label(u) } }))
+      if (srv.upgrade(req, { data: { kind: "stream", paneId, who: Identity.label(u), authTok: tokenOf(req) } }))
         return undefined as any;
       return new Response("upgrade failed", { status: 400 });
     }
@@ -538,7 +618,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       const u = whoami(req);
       if (!u) return new Response("unauthorized", { status: 401 });
       const paneId = decodeURIComponent(url.pathname.slice("/ws/terminal/".length));
-      if (srv.upgrade(req, { data: { kind: "terminal", paneId, who: Identity.label(u) } })) return undefined as any;
+      if (srv.upgrade(req, { data: { kind: "terminal", paneId, who: Identity.label(u), authTok: tokenOf(req) } })) return undefined as any;
       return new Response("upgrade failed", { status: 400 });
     }
 
@@ -570,7 +650,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       // WebSocket: accept here, dial websockify in open(), relay both ways.
       if (sub === "websockify" || sub.endsWith("/websockify")) {
         const wsTarget = `${target.protocol === "https:" ? "wss:" : "ws:"}//${target.host}/websockify`;
-        if (srv.upgrade(req, { data: { kind: "novnc", paneId, wsTarget } })) return undefined as any;
+        if (srv.upgrade(req, { data: { kind: "novnc", paneId, wsTarget, authTok: tokenOf(req) } })) return undefined as any;
         return new Response("upgrade failed", { status: 400 });
       }
 
@@ -856,15 +936,17 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           const b = await req.json().catch(() => ({} as any));
           const ttl = Number(b?.ttl_ms ?? 8 * 3600_000);
           const label = typeof b?.label === "string" ? b.label : "tunnel";
-          const t = identity.mintEphemeral(label, ttl);
+          const t = identity.mintEphemeral(label, ttl, b?.pin !== false);
           console.log(`[expose] minted an ephemeral token (${label}), expires ${new Date(t.expires).toISOString()}`);
           return Response.json(t);
         }
         if (req.method === "DELETE") {
           const tok = url.searchParams.get("t") ?? "";
           const gone = identity.revokeEphemeral(tok);
+          // Kick before replying, so the link is dead the moment this returns.
+          const evicted = gone ? evictRevoked("link revoked") : 0;
           if (gone) console.log("[expose] ephemeral token revoked");
-          return Response.json({ revoked: gone, active: identity.ephemeralCount() });
+          return Response.json({ revoked: gone, evicted, active: identity.ephemeralCount() });
         }
         return new Response("method not allowed", { status: 405 });
       }
