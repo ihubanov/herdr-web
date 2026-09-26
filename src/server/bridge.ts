@@ -18,7 +18,7 @@ import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from ".
 import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending, type AttrFmt } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
-import { findTranscript, followTranscript, readBefore, type TranscriptHandle } from "./transcript.ts";
+import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
 
 // Loopback by default. HERDR_WEB_HOST widens the bind (e.g. 0.0.0.0 inside a container whose
@@ -126,15 +126,19 @@ input{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border-rad
 const RESUME_ENABLED = ["1", "true", "yes", "on"].includes((process.env.HERDR_WEB_RESUME || "").trim().toLowerCase());
 const SESSIONS_URL = (process.env.HERDR_WEB_SESSIONS_URL || "http://127.0.0.1:8787/v1/beast/sessions").trim();
 const SESSIONS_TOKEN = (process.env.HERDR_WEB_SESSIONS_TOKEN || process.env.BEAST_SERVER_TOKEN || "").trim();
-const TRANSCRIPT_ROOT = join((process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")), "projects");
+// One definition, in transcript.ts. This used to be a second, differently
+// derived copy, which is how a pane could find a conversation's title here and
+// never its history there.
 const titleCache = new Map<string, { at: number; title: string | null }>();
 function sessionTitle(id: string): string | null {
   const c = titleCache.get(id); if (c && Date.now() - c.at < 60_000) return c.title;
   let title: string | null = null;
   try {
     const fs = require("fs") as typeof import("fs");
-    for (const dir of fs.readdirSync(TRANSCRIPT_ROOT)) {
-      const p = join(TRANSCRIPT_ROOT, dir, `${id}.jsonl`);
+    for (const [root, dir] of TRANSCRIPT_ROOTS.flatMap((r) => {
+      try { return fs.readdirSync(r).map((d) => [r, d] as const); } catch { return []; }
+    })) {
+      const p = join(root, dir, `${id}.jsonl`);
       let fd: number; try { fd = fs.openSync(p, "r"); } catch { continue; }
       const buf = Buffer.alloc(256 * 1024); const n = fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
       for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {

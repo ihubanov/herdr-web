@@ -17,10 +17,34 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-// Same root bridge.ts uses for titles: a CLAUDE_CONFIG_DIR agent (claude-local) keeps its
-// transcripts there, not under ~/.claude — with the old constant the picker listed a
-// conversation's title but the pane could never find its history.
-const ROOT = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
+/**
+ * Every place transcripts may live, searched in order.
+ *
+ * A LIST, not a root. One herdr-web commonly serves panes from more than one
+ * agent install: plain Claude Code under ~/.claude and a CLAUDE_CONFIG_DIR
+ * agent such as claude-local under its own directory. This machine has real
+ * conversations under both. A single root can only ever see one of them, and
+ * the failure is silent — the pane resolves a session id, finds no file, and
+ * renders as if the conversation were empty.
+ *
+ * That silent shape is exactly how the CLAUDE_CONFIG_DIR bug got here: this
+ * module had one constant and bridge.ts had another, derived differently, so a
+ * pane could find a conversation's TITLE and never its history. Both now come
+ * from here, because two definitions of the same path will drift again.
+ *
+ * HERDR_WEB_TRANSCRIPT_ROOTS overrides the defaults (colon-separated, like PATH)
+ * for an install that keeps them somewhere else entirely.
+ */
+export const TRANSCRIPT_ROOTS: string[] = (() => {
+  const explicit = (process.env.HERDR_WEB_TRANSCRIPT_ROOTS || "").trim();
+  if (explicit) return explicit.split(":").filter(Boolean).map((d) => join(d, "projects"));
+  const dirs = [
+    process.env.CLAUDE_CONFIG_DIR,
+    join(homedir(), ".claude"),
+    join(homedir(), ".claude-local"),
+  ].filter(Boolean) as string[];
+  return [...new Set(dirs)].map((d) => join(d, "projects"));
+})();
 
 /** Record types that are Claude Code bookkeeping, not conversation. */
 const SKIP = new Set([
@@ -35,11 +59,13 @@ const SKIP = new Set([
  */
 export async function findTranscript(sessionId: string): Promise<string | null> {
   if (!/^[0-9a-fA-F-]{8,64}$/.test(sessionId)) return null;   // never a path
-  let dirs: string[];
-  try { dirs = await readdir(ROOT); } catch { return null; }
-  for (const d of dirs) {
-    const p = join(ROOT, d, `${sessionId}.jsonl`);
-    try { await stat(p); return p; } catch { /* keep looking */ }
+  for (const root of TRANSCRIPT_ROOTS) {
+    let dirs: string[];
+    try { dirs = await readdir(root); } catch { continue; }   // root absent: try the next
+    for (const d of dirs) {
+      const p = join(root, d, `${sessionId}.jsonl`);
+      try { await stat(p); return p; } catch { /* keep looking */ }
+    }
   }
   return null;
 }
