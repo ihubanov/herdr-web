@@ -102,7 +102,7 @@ const UNAUTH_REDIRECT = (process.env.HERDR_WEB_UNAUTH_REDIRECT || "").trim();
  *  instead of a bare 401. Takes precedence over HERDR_WEB_UNAUTH_REDIRECT. The page only turns the
  *  pasted token into the normal ?token= URL — there is no new credential path. */
 const LOGIN_PAGE = ["1", "true", "yes", "on"].includes((process.env.HERDR_WEB_LOGIN_PAGE || "").trim().toLowerCase());
-function loginPage(): Response {
+function loginPage(err = false): Response {
   const alt = ALT_UI_URL ? `<p class="alt"><a href="${ALT_UI_URL.replace(/"/g, "&quot;")}" rel="noopener">Use the ${ALT_UI_LABEL.replace(/</g, "&lt;")} instead</a></p>` : "";
   const name = (AGENT_NAME || "herdr").replace(/</g, "&lt;");
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${name} — sign in</title>
@@ -110,11 +110,8 @@ function loginPage(): Response {
 form{background:#171a21;border:1px solid #2a2f3a;border-radius:12px;padding:28px 28px 20px;width:min(420px,92vw)}h1{font-size:20px;margin:0 0 6px}p{margin:6px 0 14px;color:#a9b0bd}
 input{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border-radius:8px;border:1px solid #3a4150;background:#0f1115;color:inherit}button{margin-top:12px;width:100%;font:inherit;padding:10px;border-radius:8px;border:0;background:#4f7cff;color:#fff;cursor:pointer}
 .alt{margin:16px 0 0;text-align:center}.alt a{color:#a9b0bd}.err{color:#ff8a8a;min-height:1.4em;margin:8px 0 0}</style></head><body>
-<form onsubmit="return go(event)"><h1>${name}</h1><p>Paste your personal access link, or just the token from it.</p>
-<input id="t" autocomplete="off" autofocus placeholder="https://…/?token=… or the token" aria-label="access link or token"><button type="submit">Open</button><div class="err" id="e"></div>${alt}</form>
-<script>function go(ev){ev.preventDefault();var v=document.getElementById("t").value.trim(),t=v;try{if(/^https?:/i.test(v)){t=new URL(v).searchParams.get("token")||""}}catch(_){}
-if(!/^[A-Za-z0-9._~-]{8,}$/.test(t)){document.getElementById("e").textContent="That does not look like an access link or token.";return false}
-location.replace("/?token="+encodeURIComponent(t));return false}</script></body></html>`;
+<form method="post" action="/login"><h1>${name}</h1><p>Paste your personal access link, or just the token from it. It is kept in a protected cookie — never in the address bar.</p>
+<input id="t" name="token" autocomplete="off" autofocus placeholder="https://…/?token=… or the token" aria-label="access link or token"><button type="submit">Sign in</button><div class="err" id="e">${err ? "That link or token was not accepted." : ""}</div>${alt}</form></body></html>`;
   return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
 }
 
@@ -164,6 +161,43 @@ async function listSessions(): Promise<Array<{ id: string; title: string | null;
     id: x.session_id, title: sessionTitle(x.session_id), messages: Number(x.message_count ?? 0),
     created_at: Number(x.created_at ?? 0), last_activity_at: Number(x.last_activity_at ?? 0), busy: !!x.busy,
   })).sort((a, b) => b.last_activity_at - a.last_activity_at).slice(0, 50);
+}
+
+/**
+ * Cookie sessions (default ON; HERDR_WEB_COOKIE_AUTH=0 restores query-only auth). The token in
+ * the URL is the credential, and a URL is on screen, in history and in bookmarks — a photo of the
+ * screen is a login. So: POST /login (the sign-in page) or any page visit that arrives WITH
+ * ?token= for a NAMED user sets an HttpOnly cookie carrying the token and redirects to the same
+ * path without it. Every later request authenticates from the cookie; the address bar stays
+ * clean. Ephemeral (expose.sh) tokens keep the query form, because their claim-on-first-use
+ * pin depends on it. GET /logout clears the cookie.
+ */
+const COOKIE_AUTH = !["0", "false", "off", "no"].includes((process.env.HERDR_WEB_COOKIE_AUTH || "1").trim().toLowerCase());
+const AUTH_COOKIE = "hw_auth";
+const AUTH_COOKIE_MAX_AGE = 30 * 24 * 3600;
+function cookieToken(req: Request): string | null {
+  if (!COOKIE_AUTH) return null;
+  const c = req.headers.get("cookie") ?? "";
+  for (const part of c.split(";")) {
+    const [k, ...v] = part.trim().split("=");
+    if (k === AUTH_COOKIE) { try { return decodeURIComponent(v.join("=")); } catch { return v.join("="); } }
+  }
+  return null;
+}
+function cookieable(token: string): boolean {
+  // named users and the admin: yes. ephemeral (pinned) guests: no — see above.
+  return !!identity.resolve(token) && identity.pinState(token) === null;
+}
+function setAuthCookie(req: Request, token: string): string {
+  return `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_COOKIE_MAX_AGE};${secureAttr(req)}`;
+}
+function clearAuthCookie(req: Request): string {
+  return `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;${secureAttr(req)}`;
+}
+function tokenFromPasted(v: string): string {
+  const s = (v || "").trim();
+  if (/^https?:\/\//i.test(s)) { try { return new URL(s).searchParams.get("token") || ""; } catch { return ""; } }
+  return s;
 }
 
 /** Which view a pane opens in before the person has chosen: "chat" (default) or "terminal". */
@@ -313,7 +347,7 @@ function methodAllowed(m: string): boolean {
 /** Resolve the caller to a user, or null to reject. */
 function whoami(req: Request): User | null {
   const url = new URL(req.url);
-  const t = url.searchParams.get("token") || req.headers.get("x-herdr-token");
+  const t = url.searchParams.get("token") || req.headers.get("x-herdr-token") || cookieToken(req);
   return identity.resolve(t);
 }
 function authed(req: Request): boolean {
@@ -553,9 +587,61 @@ const server = Bun.serve<WsData>({
 
     if (proxied) return proxied;
 
+    if (COOKIE_AUTH) {
+
+      const u0 = new URL(req.url);
+
+      if (req.method === "POST" && u0.pathname === "/login") {
+
+        let raw = "";
+
+        const ct = req.headers.get("content-type") || "";
+
+        try {
+
+          if (ct.includes("json")) raw = String(((await req.json()) as any)?.token ?? "");
+
+          else raw = String((await req.formData()).get("token") ?? "");
+
+        } catch { raw = ""; }
+
+        const tok = tokenFromPasted(raw);
+
+        if (tok && cookieable(tok)) {
+
+          return new Response(null, { status: 303, headers: { location: "/", "set-cookie": setAuthCookie(req, tok), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+
+        }
+
+        return new Response(null, { status: 303, headers: { location: "/?err=1", "cache-control": "no-store" } });
+
+      }
+
+      if (req.method === "GET" && u0.pathname === "/logout") {
+
+        return new Response(null, { status: 303, headers: { location: "/", "set-cookie": clearAuthCookie(req), "cache-control": "no-store" } });
+
+      }
+
+      // A page visit carrying ?token= for a named user: move the token into the cookie and
+
+      // redirect to the clean URL, so it never sits in the address bar, history or a screenshot.
+
+      const qtok = u0.searchParams.get("token");
+
+      if (qtok && req.method === "GET" && (u0.pathname === "/" || u0.pathname === "/index.html")
+
+          && (req.headers.get("accept") || "").includes("text/html") && cookieable(qtok)) {
+
+        return new Response(null, { status: 303, headers: { location: u0.pathname, "set-cookie": setAuthCookie(req, qtok), "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+
+      }
+
+    }
+
     if (new URL(req.url).pathname === "/" && !authed(req)) {
 
-      if (LOGIN_PAGE) return loginPage();
+      if (LOGIN_PAGE) return loginPage(new URL(req.url).searchParams.get("err") === "1");
 
       if (UNAUTH_REDIRECT) return Response.redirect(UNAUTH_REDIRECT, 302);
 
@@ -792,7 +878,7 @@ const server = Bun.serve<WsData>({
 });
 
 function tokenOf(req: Request): string {
-  return new URL(req.url).searchParams.get("token") || req.headers.get("x-herdr-token") || "";
+  return new URL(req.url).searchParams.get("token") || req.headers.get("x-herdr-token") || cookieToken(req) || "";
 }
 
 /**

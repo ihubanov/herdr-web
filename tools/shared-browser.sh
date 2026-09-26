@@ -209,6 +209,10 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
       # is silently ignored, and the window comes up at Chrome's own 1050x780
       # leaving a black margin inside the iframe that looks like a VNC fault.
       SCREEN_W="${GEOM%%x*}"; SCREEN_H="$(printf '%s' "$GEOM" | cut -dx -f2)"
+      # HERDR_SHARE_BROWSER_ARGS: extra browser flags for environments where the defaults
+      # cannot start it. Inside a Docker container Chromium cannot create its sandbox namespaces
+      # and /dev/shm is 64 MB, so that box sets "--no-sandbox --disable-dev-shm-usage".
+      # On a desktop leave it unset.
       KIOSK_ARGS=""
       [ "$KIOSK" = 1 ] && KIOSK_ARGS="--kiosk"
       # -u XDG_SESSION_TYPE is as important as -u WAYLAND_DISPLAY and was the
@@ -220,7 +224,7 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
         --user-data-dir="${XDG_RUNTIME_DIR:-/tmp}/shared-browser-${DISPLAY_N}" \
         --no-first-run --no-default-browser-check \
         --disable-session-crashed-bubble --disable-infobars \
-        $KIOSK_ARGS --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
+        $KIOSK_ARGS ${HERDR_SHARE_BROWSER_ARGS:-} --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
         --remote-debugging-port=$((9300 + DISPLAY_N)) \
         "$START_URL" >/dev/null 2>&1 &
       note_pid $!

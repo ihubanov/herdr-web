@@ -5,7 +5,7 @@ const { Terminal } = window;
 const FitAddon = window.FitAddon?.FitAddon || window.FitAddon;
 
 const token = new URLSearchParams(location.search).get("token") || "";
-const auth = (p) => `${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
+const auth = (p) => token ? `${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : p;  // cookie sessions carry no token in URLs
 const $ = (id) => document.getElementById(id);
 
 const el = {

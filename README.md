@@ -254,6 +254,8 @@ path as the agent stream — and herdr-web will show it as a view.
 
 ```bash
 HERDR_WEB_IFRAMES=off | loopback | on      # default: off
+HERDR_WEB_COOKIE_AUTH=1                    # default on: POST /login or a ?token= page visit sets an HttpOnly cookie and the URL is scrubbed; GET /logout clears it
+HERDR_SHARE_BROWSER_ARGS="--no-sandbox --disable-dev-shm-usage"  # extra flags for the shared browser (needed inside Docker; unset on a desktop)
 HERDR_WEB_RESUME=1                         # "+" offers existing conversations; launches with HERDR_UI_RESUME=<id> prepended to the locked command
 HERDR_WEB_SESSIONS_URL=http://127.0.0.1:8787/v1/beast/sessions   # where that list comes from (default); token: HERDR_WEB_SESSIONS_TOKEN or BEAST_SERVER_TOKEN, server-held
 ```
