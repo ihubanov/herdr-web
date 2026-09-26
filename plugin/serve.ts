@@ -10,7 +10,7 @@ console.log("herdr web");
 console.log("---------");
 for (const [name, url] of urlsFor(env)) console.log(`  ${name.padEnd(10)} ${url}`);
 console.log(`\n  config  ${envPath()}`);
-console.log(`  bound   127.0.0.1 only\n`);
+console.log(`  bound   ${(process.env.HERDR_WEB_HOST || "127.0.0.1").trim()}${(process.env.HERDR_WEB_HOST || "").trim() ? "" : " only"}\n`);
 
 // Restart on crash so a transient failure does not take the UI down for
 // everyone; herdr shows this pane's output, so failures stay visible.

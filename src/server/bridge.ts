@@ -21,7 +21,11 @@ import { detect as detectStream, open as openStream, type StreamHandle } from ".
 import { findTranscript, followTranscript, readBefore, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
 
-const HOST = "127.0.0.1";
+// Loopback by default. HERDR_WEB_HOST widens the bind (e.g. 0.0.0.0 inside a container whose
+// port is published to a LAN address that a tunnel fronts). The token stays mandatory either
+// way — this changes reachability, not authentication. Never widen it on a machine whose port
+// is directly routable from the internet.
+const HOST = (process.env.HERDR_WEB_HOST || "127.0.0.1").trim();
 const PORT = Number(process.env.HERDR_WEB_PORT || 7878);
 const identity = new Identity();
 
@@ -45,6 +49,15 @@ const DEFAULT_LAUNCH_CMD = (process.env.HERDR_WEB_DEFAULT_LAUNCH_CMD || "").trim
  * user with a pane can type anything regardless; it just stops the new-session
  * dialog from being an arbitrary-command box.
  */
+/**
+ * Optional link to another front end for the same agent (e.g. the classic beast-server web
+ * UI), rendered as a header button so a person who is not comfortable here can switch with
+ * one click. Nothing is rendered when unset. Interfaces, not conversations: the other UI
+ * shows its own sessions.
+ */
+const ALT_UI_URL = (process.env.HERDR_WEB_ALT_UI_URL || "").trim();
+const ALT_UI_LABEL = (process.env.HERDR_WEB_ALT_UI_LABEL || "Classic UI").trim();
+
 const LOCK_LAUNCH = ["1", "true", "yes", "on"].includes(
   (process.env.HERDR_WEB_LOCK_LAUNCH || "").trim().toLowerCase(),
 );
@@ -827,6 +840,8 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           defaultLaunchCmd: DEFAULT_LAUNCH_CMD,
           lockLaunch: LOCK_LAUNCH,
           agentName: AGENT_NAME,
+          altUiUrl: ALT_UI_URL || null,
+          altUiLabel: ALT_UI_LABEL,
         });
       }
 
