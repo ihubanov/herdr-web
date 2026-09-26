@@ -202,6 +202,53 @@ function positionWhoami() {
 
 function entry(id) { return fleet.find((f) => f.pane_id === id) || null; }
 
+/**
+ * Re-read what a pane can do, and paint the buttons from it.
+ *
+ * Called on select AND periodically, because an agent advertises by setting a
+ * pane token whenever it likes — including while the user already has that pane
+ * open. Fetching only on select meant an agent could ask for a view and nothing
+ * appeared until the user happened to click away and back, which reads as the
+ * request having been ignored.
+ */
+let saidRejected = null;
+async function refreshCapability(paneId, { firstLook = false } = {}) {
+  let c;
+  try {
+    c = await (await fetch(auth(`/api/capability?pane_id=${encodeURIComponent(paneId)}`))).json();
+  } catch { return; }
+  if (selected !== paneId) return;                // the user moved on mid-flight
+  const before = capability?.iframe?.url ?? null;
+  capability = c;
+  capCache.set(paneId, c);
+  applyChatBtn(c);
+  if (firstLook && c?.stream && preferChat && view === "terminal") openChat(paneId);
+
+  // The button is always available on a selected pane, not only when an agent
+  // happened to advertise something: with nothing advertised it STARTS a shared
+  // browser, which is how a user gets one without asking an agent to.
+  el.framebtn.style.display = "inline-block";
+  el.framebtn.title = c?.iframe
+    ? `Embedded view: ${c.iframe.url}`
+    : "Open a shared browser window on this pane";
+
+  const now = c?.iframe?.url ?? null;
+  if (!firstLook && now !== before) {
+    if (now && frameOpen) openFrame(now);         // the agent replaced what it shows
+    else if (!now && frameOpen) dismissFrame();   // …or withdrew it
+    else if (now) el.tstatus.textContent = "a view is being offered — open it with the view button";
+  }
+
+  // A rejected advertisement is worth saying out loud: an agent asked to show
+  // something and policy refused, which is otherwise invisible. Said once per
+  // distinct refusal, or a 5s poll would repeat it forever.
+  if (c?.iframeRejected && c.iframeRejected !== saidRejected) {
+    console.warn(`herdr-web: iframe refused — ${c.iframeRejected}`);
+    el.tstatus.textContent = `view blocked (${c.iframePolicy})`;
+  }
+  saidRejected = c?.iframeRejected ?? null;
+}
+
 function attach(f, mode = "observe") {
   if (!f) return;
   closeChat();
@@ -225,32 +272,7 @@ function attach(f, mode = "observe") {
 
   if (toChat) openChat(f.pane_id);
   // Re-ask anyway: an agent can start or stop advertising between opens.
-  fetch(auth(`/api/capability?pane_id=${encodeURIComponent(f.pane_id)}`))
-    .then((r) => r.json())
-    .then((c) => {
-      if (selected !== f.pane_id) return;         // user moved on
-      capability = c;
-      capCache.set(f.pane_id, c);
-      applyChatBtn(c);
-      // Only auto-open if we hadn't already decided from cache, and the user
-      // hasn't navigated away from the terminal in the meantime.
-      if (c?.stream && preferChat && view === "terminal") openChat(f.pane_id);
-
-      // The button is always available on a selected pane, not only when an agent
-      // happened to advertise something: with nothing advertised it STARTS a
-      // shared browser, which is how a user gets one without asking an agent to.
-      el.framebtn.style.display = "inline-block";
-      el.framebtn.title = c?.iframe
-        ? `Embedded view: ${c.iframe.url}`
-        : "Open a shared browser window on this pane";
-      // A rejected advertisement is worth saying out loud: an agent asked to
-      // show something and policy refused, which is otherwise invisible.
-      if (c?.iframeRejected) {
-        console.warn(`herdr-web: iframe refused — ${c.iframeRejected}`);
-        el.tstatus.textContent = `view blocked (${c.iframePolicy})`;
-      }
-    })
-    .catch(() => {});
+  void refreshCapability(f.pane_id, { firstLook: true });
   el.tstatus.textContent = "attaching…";
   term.reset();
   renderTree();
@@ -1325,6 +1347,12 @@ setInterval(() => {
     n.textContent = ago(Number(n.dataset.since));
   });
 }, 1000);
+
+// Watch the selected pane's advertisement. Polled rather than pushed: herdr has
+// no event for a metadata token changing, and the tokens carry a TTL and are
+// refreshed, so an event per change would be noise anyway. 5s is well inside the
+// 5-minute TTL and costs one small local request.
+setInterval(() => { if (selected) void refreshCapability(selected); }, 5000);
 
 // ------------------------------------------------------------------ alerting
 let audioCtx = null;
