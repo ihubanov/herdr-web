@@ -36,8 +36,15 @@ let agentHolds = false;
 // look identical to a driver otherwise, and the second is a misconfiguration it
 // could fix — exactly the ambiguity that made the lock scripts hard to debug.
 let reason: "unheld" | "unauthorized" | "unreachable" | "ok" = "unreachable";
-let lastPoll = 0;
 const live = new Set<Socket>();
+
+/** One in-flight poll, shared. A burst of connections must not become a burst
+ *  of requests to the bridge. */
+let polling: Promise<void> | null = null;
+function pollOnce(): Promise<void> {
+  if (!polling) polling = poll().finally(() => { polling = null; });
+  return polling;
+}
 
 async function poll() {
   try {
@@ -45,7 +52,6 @@ async function poll() {
     u.searchParams.set("pane_id", PANE);
     if (TOKEN) u.searchParams.set("token", TOKEN);
     const r = await fetch(u, { signal: AbortSignal.timeout(1500) });
-    lastPoll = Date.now();
     if (r.status === 401) {
       // Fails closed, but say so: the gate could not ASK, which is a token
       // problem on this side, not the human holding the display.
@@ -82,10 +88,23 @@ const REFUSAL: Record<string, { error: string; hint: string }> = {
 };
 
 const server = createServer(async (client) => {
-  // A claim followed immediately by a connect would otherwise eat a spurious
-  // refusal for up to POLL_MS. Re-ask on demand when we think the gate is shut
-  // and our information is already stale.
-  if (!agentHolds && Date.now() - lastPoll > 250) await poll();
+  const early: Buffer[] = [];
+  const stash = (c: Buffer) => { early.push(c); };
+  client.on("data", stash);
+
+  // Re-ask on EVERY new connection, in both directions, before deciding.
+  //
+  // Refusing from cached state turns the normal sequence — claim, then drive —
+  // into a spurious refusal the caller has to sleep through; that is where the
+  // "wait 2-3s after claiming" advice came from.
+  //
+  // ADMITTING from cached state is the worse half: the human takes the display
+  // back and, until the next interval poll, a NEW connection is still let
+  // through. Dropping live sockets on the way down was never enough on its own.
+  //
+  // One local request per new CDP connection, coalesced so a burst is one poll.
+  // A driver opens a handful of connections, not thousands.
+  await pollOnce();
   if (!agentHolds) {
     // Answer in HTTP so a driver gets a diagnosable refusal rather than a
     // bare reset it will report as "Chrome is not running".
@@ -96,6 +115,7 @@ const server = createServer(async (client) => {
       pane: PANE,
       hint: r.hint.replace("<pane>", PANE),
     });
+    client.off("data", stash);
     client.end(
       "HTTP/1.1 423 Locked\r\n" +
       "Content-Type: application/json\r\n" +
@@ -103,7 +123,18 @@ const server = createServer(async (client) => {
       "Connection: close\r\n\r\n" + body);
     return;
   }
+  // Whatever the client sent while we were asking is already in flight, and it
+  // is the HTTP request itself. Capture it and replay it once upstream is
+  // connected: with the poll now awaited on every connection, a naive pipe
+  // loses those first bytes, upstream never sees a request, and the caller gets
+  // an accepted connection that answers nothing — which reads as a hung gate.
   const upstream = connect(TARGET, "127.0.0.1");
+  upstream.on("connect", () => {
+    client.off("data", stash);
+    for (const c of early) upstream.write(c);
+    early.length = 0;
+    client.pipe(upstream);
+  });
   live.add(client);
   const drop = () => {
     live.delete(client);
@@ -114,8 +145,7 @@ const server = createServer(async (client) => {
   upstream.on("error", drop);
   client.on("close", drop);
   upstream.on("close", drop);
-  client.pipe(upstream);
-  upstream.pipe(client);
+  upstream.pipe(client);          // client->upstream is piped once connected
 });
 
 server.on("error", (e) => { console.error(`cdp-gate: ${e.message}`); process.exit(1); });
@@ -123,5 +153,5 @@ server.listen(LISTEN, "127.0.0.1", () => {
   console.error(`cdp-gate: 127.0.0.1:${LISTEN} -> 127.0.0.1:${TARGET} (pane ${PANE})`);
 });
 
-void poll();
-setInterval(poll, POLL_MS);
+void pollOnce();
+setInterval(() => void pollOnce(), POLL_MS);

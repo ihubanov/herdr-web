@@ -227,6 +227,14 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
       # Verify it actually MAPPED a window, rather than merely starting. A browser
       # that answers CDP but has no window serves a black screen, and every
       # failure mode above produces exactly that.
+      # A mapped window is not the same as a listening debugging port, and the
+      # address we are about to hand out is the port. Wait for both, or a caller
+      # that connects the moment /api/share returns gets ECONNREFUSED through
+      # the gate and reports the display as broken.
+      for _ in $(seq 40); do
+        (exec 3<>"/dev/tcp/127.0.0.1/$((9300 + DISPLAY_N))") 2>/dev/null && { exec 3<&-; break; }
+        sleep 0.25
+      done
       MAPPED=0
       for _ in $(seq 24); do
         if DISPLAY=":${DISPLAY_N}" xwininfo -root -children 2>/dev/null \
@@ -268,6 +276,14 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
           --pane "$HERDR_PANE_ID" --web "${HERDR_WEB_URL:-http://127.0.0.1:7878}" \
           >/dev/null 2>&1 &
         note_pid $!
+        # Wait for it to BIND before saying it is there. Returning early means a
+        # caller that connects immediately — which is what an agent does, since
+        # we just handed it the address — gets ECONNREFUSED and reports the gate
+        # as down, when it was merely half a second from existing.
+        for _ in $(seq 40); do
+          (exec 3<>"/dev/tcp/127.0.0.1/$((9400 + DISPLAY_N))") 2>/dev/null && { exec 3<&-; break; }
+          sleep 0.1
+        done
         echo "cdp gate: 127.0.0.1:$((9400 + DISPLAY_N)) (agent must hold the input lock)"
       fi
       break

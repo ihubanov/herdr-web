@@ -331,6 +331,13 @@ instead of seeing a broken tool.
 debugging port. That is the whole point of the gate: an agent that ignores the
 input lock cannot connect at all, rather than being asked nicely not to.
 
+The gate answers a refused connection with **HTTP 423 Locked** and a JSON body
+naming the reason (`unheld`, `unauthorized`, `unreachable`) — a diagnosable
+refusal rather than a reset the driver would report as "Chrome is not running".
+It re-reads the lock on every new connection, in both directions, so claim then
+connect needs no wait, and a release is honoured immediately rather than up to a
+poll interval later.
+
 ## Chat view
 
 For agents that implement [`herdr-agent-stream/1`](docs/PROTOCOL.md), a **chat
