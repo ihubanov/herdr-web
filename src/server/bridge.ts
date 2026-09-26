@@ -8,10 +8,10 @@
  *   - RPC proxying is allow-listed by method prefix, not open passthrough
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, unlinkSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, extname, normalize } from "node:path";
+import { join, dirname, extname, normalize } from "node:path";
 import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
 import { openTerminalSession, type TerminalSession } from "./terminal-bridge.ts";
 import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from "./fleet.ts";
@@ -194,6 +194,36 @@ function authed(req: Request): boolean {
  * Only loopback targets are ever proxied: this turns herdr-web into an open
  * relay otherwise, reachable by anyone who can name a pane.
  */
+/**
+ * The URL a BROWSER should point at for this pane's advertised view.
+ *
+ * A raw 127.0.0.1 URL is right on this host and useless to everyone else, so a
+ * display we can proxy is rewritten onto our own origin. Both /api/capability
+ * and /api/share answer with this, because a button and a tool call handing back
+ * different URLs for the same display is a bug waiting to happen.
+ */
+async function iframeForPane(
+  paneId: string,
+): Promise<{ url?: string; rejected?: string }> {
+  try {
+    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+    const raw = String(tokens.iframe_url ?? "").trim();
+    if (!raw) return {};
+    const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
+    if (!v.ok) return { rejected: v.reason };
+    const t = await sharedTarget(paneId);
+    if (!t) return { url: v.url };
+    const p = new URL(v.url);
+    const tail = p.pathname.replace(/^\/+/, "");
+    return {
+      url: `/shared/${encodeURIComponent(paneId)}/` +
+           (tail === "shared.html" ? "" : tail) + p.search,
+    };
+  } catch {
+    return {};                                  // pane vanished
+  }
+}
+
 async function sharedTarget(paneId: string): Promise<URL | null> {
   try {
     const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
@@ -839,32 +869,9 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         // An agent advertises a view the same way it advertises a stream:
         // a pane metadata token. Same discovery path, same TTL semantics.
-        let iframe: { url: string } | null = null;
-        let iframeRejected: string | null = null;
-        try {
-          const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
-          const raw = String(tokens.iframe_url ?? "").trim();
-          if (raw) {
-            const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
-            if (v.ok) {
-              // Hand back a URL on OUR origin when this is a shared display we
-              // can proxy. A raw 127.0.0.1 URL is correct on this host and
-              // useless to everyone else; the proxied one works for both.
-              const t = await sharedTarget(paneId);
-              if (t) {
-                const p = new URL(v.url);
-                const tail = p.pathname.replace(/^\/+/, "");
-                iframe = {
-                  url: `/shared/${encodeURIComponent(paneId)}/` +
-                       (tail === "shared.html" ? "" : tail) + p.search,
-                };
-              } else {
-                iframe = { url: v.url };
-              }
-            }
-            else iframeRejected = v.reason;
-          }
-        } catch { /* pane vanished */ }
+        const resolved = await iframeForPane(paneId);
+        const iframe: { url: string } | null = resolved.url ? { url: resolved.url } : null;
+        const iframeRejected: string | null = resolved.rejected ?? null;
 
         return Response.json({
           pane_id: paneId,
@@ -978,6 +985,106 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           return Response.json({ revoked: gone, evicted, active: identity.ephemeralCount() });
         }
         return new Response("method not allowed", { status: 405 });
+      }
+
+      // Open something in a pane's embedded view. One endpoint for both the
+      // human (the toolbar button) and an agent (MCP, later), so there is a
+      // single place where policy, gating and teardown live.
+      if (url.pathname === "/api/share" && req.method === "POST") {
+        const b = await req.json().catch(() => ({} as any));
+        const paneId = String(b?.pane_id ?? "");
+        const action = String(b?.action ?? "");
+        if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+
+        const here = dirname(new URL(import.meta.url).pathname);
+        const tools = join(here, "..", "..", "tools");
+        // shared-browser.sh shells out to the herdr CLI, so it needs a binary
+        // path even though this server talks to herdr over its socket.
+        const herdrBin = process.env.HERDR_BIN_PATH
+          || join(process.env.HOME ?? "", ".local", "bin", "herdr");
+        const env = { ...process.env, HERDR_PANE_ID: paneId, HERDR_BIN_PATH: herdrBin };
+
+        if (action === "url") {
+          const raw = String(b?.url ?? "").trim();
+          if (!raw) return Response.json({ error: "url required" }, { status: 400 });
+          // Check the policy BEFORE advertising: a refusal the caller can read
+          // beats a token that silently never renders.
+          const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
+          if (!v.ok) return Response.json({ error: v.reason }, { status: 400 });
+          try {
+            await call("pane.report_metadata", {
+              pane_id: paneId, source: "herdr-web",
+              tokens: { iframe_url: v.url }, ttl_ms: 300_000,
+            });
+            return Response.json({ ok: true, url: v.url });
+          } catch (e: any) {
+            return Response.json({ error: e?.message ?? "could not advertise" }, { status: 502 });
+          }
+        }
+
+        if (action === "browser" || action === "stop") {
+          const script = join(tools, "shared-browser.sh");
+          // Display and port derive from the pane id so two panes never collide,
+          // and so "stop" can find what "browser" started without bookkeeping.
+          const n = 50 + (Math.abs([...paneId].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 40);
+          const args = action === "stop"
+            // Pass the port on the stop path too. shared-browser.sh no longer
+            // needs it to find websockify, but anything else keyed to the port
+            // stays correct without having to remember this asymmetry.
+            ? ["--stop", "--display", String(n), "--port", String(6900 + n)]
+            : ["--display", String(n), "--port", String(6900 + n),
+               ...(b?.geometry ? ["--geometry", String(b.geometry)] : []),
+               ...(b?.url ? ["--url", String(b.url)] : []),
+               ...(b?.kiosk === false ? ["--no-kiosk"] : [])];
+          // Output goes to a FILE, not a pipe. The script leaves background
+          // children running by design, they inherit its stdout, and reading a
+          // pipe to EOF therefore waits for a process that never exits — the
+          // request hung for the full timeout with the display already up.
+          const logPath = join(
+            process.env.XDG_RUNTIME_DIR || "/tmp",
+            `herdr-share-${n}-${Date.now()}.log`,
+          );
+          try {
+            const proc = Bun.spawn([script, ...args], {
+              env, stdin: "ignore",
+              stdout: Bun.file(logPath), stderr: Bun.file(logPath),
+            });
+            const timedOut = Symbol("timeout");
+            const code = await Promise.race([
+              proc.exited,
+              new Promise((r) => setTimeout(() => r(timedOut), 45_000)),
+            ]);
+            if (code === timedOut) {
+              proc.kill();
+              return Response.json({ error: "shared-browser.sh did not finish in 45s" },
+                                   { status: 504 });
+            }
+            let out = "";
+            try { out = readFileSync(logPath, "utf8"); } catch { /* nothing written */ }
+            try { unlinkSync(logPath); } catch { /* already gone */ }
+            if (code !== 0) {
+              return Response.json({ error: out.trim().slice(0, 400) || `exit ${code}` },
+                                   { status: 500 });
+            }
+            // The script advertises the display through pane metadata; read it
+            // back rather than reconstructing it, so the caller gets exactly the
+            // URL the UI would resolve — proxied onto this origin.
+            const view = action === "browser" ? await iframeForPane(paneId) : {};
+            return Response.json({
+              ok: true, display: n,
+              iframe_url: view.url,
+              iframe_rejected: view.rejected,
+              // The GATE port, never the raw CDP port: handing out 9300+n would
+              // let an agent drive the display without holding the input lock.
+              cdp_gate_port: action === "browser" ? 9400 + n : undefined,
+              output: out.trim().slice(0, 600),
+            });
+          } catch (e: any) {
+            return Response.json({ error: e?.message ?? "spawn failed" }, { status: 500 });
+          }
+        }
+
+        return Response.json({ error: "action must be url|browser|stop" }, { status: 400 });
       }
 
       if (url.pathname === "/api/presence") {

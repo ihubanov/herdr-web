@@ -18,8 +18,9 @@ const el = {
   chatbtn: $("chatbtn"),
   cclip: $("cclip"), cfile: $("cfile"), attachbar: $("attachbar"), dropveil: $("dropveil"),
   lockstate: $("lockstate"), locktake: $("locktake"), lockrelease: $("lockrelease"),
-  framescrim: $("framescrim"), frameclose: $("frameclose"),
+  frameclose: $("frameclose"),
   frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
+  framebar: $("framebar"), framemax: $("framemax"), framestop: $("framestop"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
   divider: $("divider"), toggleside: $("toggleside"), drawerscrim: $("drawerscrim"), fleetbtn: $("fleetbtn"), triage: $("triage"),
   newspace: $("newspace"), modal: $("modal"), mtitle: $("mtitle"), msub: $("msub"),
@@ -235,8 +236,13 @@ function attach(f, mode = "observe") {
       // hasn't navigated away from the terminal in the meantime.
       if (c?.stream && preferChat && view === "terminal") openChat(f.pane_id);
 
-      el.framebtn.style.display = c?.iframe ? "inline-block" : "none";
-      el.framebtn.title = c?.iframe ? `Embedded view: ${c.iframe.url}` : "";
+      // The button is always available on a selected pane, not only when an agent
+      // happened to advertise something: with nothing advertised it STARTS a
+      // shared browser, which is how a user gets one without asking an agent to.
+      el.framebtn.style.display = "inline-block";
+      el.framebtn.title = c?.iframe
+        ? `Embedded view: ${c.iframe.url}`
+        : "Open a shared browser window on this pane";
       // A rejected advertisement is worth saying out loud: an agent asked to
       // show something and policy refused, which is otherwise invisible.
       if (c?.iframeRejected) {
@@ -310,20 +316,12 @@ el.detach.onclick = detach;
 // ------------------------------------------------------------------ views
 function setView(v) {
   view = v;
-  // "frame" is an OVERLAY, not a peer view: whatever was underneath stays put
-  // and visible behind the scrim, which is what makes it read as a modal rather
-  // than a navigation. Only the modal's own visibility changes here.
-  if (v === "frame") {
-    el.frameview.classList.add("on");
-    el.framebtn.classList.add("on");
-    applyChatBtn(capability);
-    return;
-  }
+  // The embedded view is deliberately NOT one of these. It is a floating window
+  // that lives above whichever view is current, so switching views leaves it
+  // alone and closing it does not have to restore anything.
   el.fleet.classList.toggle("on", v === "fleet");
   el.term.classList.toggle("hidden", v !== "terminal");
   el.chatview.classList.toggle("on", v === "chat");
-  el.frameview.classList.remove("on");
-  el.framebtn.classList.toggle("on", v === "frame");
   el.fleetbtn.classList.toggle("on", v === "fleet");
   el.chatbtn.classList.toggle("on", v === "chat");
   applyChatBtn(capability);
@@ -431,9 +429,51 @@ window.matchMedia(NARROW).addEventListener("change", (m) => {
 });
 el.fleetbtn.onclick = toggleView;
 el.framebtn.onclick = () => {
-  if (view === "frame") { dismissFrame(); }
-  else if (selected && capability?.iframe) openFrame(capability.iframe.url);
+  if (frameOpen) { dismissFrame(); return; }
+  // An agent-advertised URL is the fast path. With nothing advertised the button
+  // still works: it asks for a shared browser, which is the whole reason a user
+  // wants this without an agent having thought of it first.
+  if (capability?.iframe) openFrame(capability.iframe.url);
+  else void startSharedBrowser();
 };
+
+/**
+ * Ask the bridge for a shared browser on this pane, then show it.
+ *
+ * Same endpoint the agent-facing API uses, so a button press and a tool call
+ * cannot drift apart — and the reply carries the proxied path, never the
+ * loopback URL the script printed, which would be the viewer's own machine.
+ */
+async function startSharedBrowser() {
+  if (!selected) { el.tstatus.textContent = "select a pane first"; return; }
+  el.framebtn.disabled = true;
+  const prev = el.framebtn.textContent;
+  el.framebtn.textContent = "…";
+  el.tstatus.textContent = "starting a shared browser…";
+  try {
+    const r = await fetch(auth("/api/share"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pane_id: selected, action: "browser" }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.iframe_url) {
+      el.tstatus.textContent = `share failed: ${d.error || r.statusText}`;
+      return;
+    }
+    el.tstatus.textContent = "shared browser ready";
+    openFrame(d.iframe_url);
+  } catch (e) {
+    el.tstatus.textContent = `share failed: ${e?.message ?? e}`;
+  } finally {
+    el.framebtn.disabled = false;
+    el.framebtn.textContent = prev;
+  }
+}
+
+/** Whether the floating window is up. Declared here, above every function that
+ *  reads it: detach() runs during startup and would otherwise hit its TDZ. */
+let frameOpen = false;
 
 /**
  * Show an agent-advertised URL. The frame is sandboxed and must be a different
@@ -461,33 +501,218 @@ function openFrame(url) {
   el.frameurl.textContent = url;
   const f = entry(selected);
   el.framewho.textContent = f ? `from ${f.title}` : "";
-  // Remember what was underneath so closing restores it rather than guessing.
-  frameUnder = view === "frame" ? frameUnder : view;
-  el.framescrim.classList.add("on");
-  setView("frame");
+  // Only a display proxied through us can be shut down from here; an
+  // agent-advertised third-party page is not ours to stop.
+  el.framestop.style.display = ours ? "" : "none";
+  frameOpen = true;
+  restoreGeom();
+  el.frameview.classList.add("on");
+  el.framebtn.classList.add("on");
   startLockWatch(selected);
 }
 function closeFrame() {
   el.frame.src = "about:blank";
   el.frameurl.textContent = "";
-  el.framescrim.classList.remove("on");
+  frameOpen = false;
+  el.frameview.classList.remove("on");
+  el.framebtn.classList.remove("on");
   stopLockWatch();
 }
 
-/** The view the modal was opened over, restored when it closes. */
-let frameUnder = "terminal";
-
 function dismissFrame() {
-  if (view !== "frame") return;
-  const back = frameUnder || (selected ? "terminal" : "fleet");
+  if (!frameOpen) return;
   closeFrame();
-  setView(back);
+  // Nothing to restore: the view underneath was never hidden.
+  if (view === "terminal") setTimeout(refit, 40);
 }
 
 el.frameclose.onclick = dismissFrame;
-el.framescrim.onclick = dismissFrame;
+
+// Closing the window hides a display that is still running — Xvfb, a browser and
+// a VNC server, indefinitely. This is the other half: stop the thing, not the
+// view of it. Kept as a separate button because an agent may still be working on
+// that display, and closing a window must never kill work.
+el.framestop.onclick = async () => {
+  if (!selected) return;
+  const b = el.framestop, prev = b.textContent;
+  b.disabled = true; b.textContent = "stopping…";
+  try {
+    const r = await fetch(auth("/api/share"), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pane_id: selected, action: "stop" }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { el.tstatus.textContent = `stop failed: ${d.error || r.statusText}`; return; }
+    el.tstatus.textContent = "shared display stopped";
+    dismissFrame();
+  } catch (e) {
+    el.tstatus.textContent = `stop failed: ${e?.message ?? e}`;
+  } finally {
+    b.disabled = false; b.textContent = prev;
+  }
+};
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && view === "frame") { dismissFrame(); e.preventDefault(); }
+  // Escape closes the window only while it has focus. A floating window must not
+  // swallow Escape from the terminal behind it — that key is the agent's.
+  if (e.key !== "Escape" || !frameOpen) return;
+  if (!el.frameview.contains(document.activeElement)) return;
+  dismissFrame(); e.preventDefault();
+});
+
+/* --------------------------------------------------------------- window chrome
+ * Move, resize, maximise. Two things make this less trivial than it sounds:
+ *
+ *  1. An IFRAME EATS POINTER EVENTS. The moment the cursor crosses into it
+ *     mid-drag, the events go to the framed document and the gesture dies. So a
+ *     transparent shield is laid over the frame for the duration of every drag
+ *     (body.winop), and removed after.
+ *  2. Pointer capture, not mousemove-on-document: with setPointerCapture the
+ *     gesture survives leaving the window and the browser's own drag heuristics,
+ *     and it gives touch and pen the same behaviour for free.
+ *
+ * Geometry is persisted, because a window that forgets where you put it is a
+ * modal with extra steps.
+ */
+const GEOM_KEY = "herdr.frame.geom";
+const WIN_MIN_W = 320, WIN_MIN_H = 200;
+
+function readGeom() {
+  try { return JSON.parse(localStorage.getItem(GEOM_KEY) || "null"); } catch { return null; }
+}
+
+/**
+ * Persist the geometry.
+ *
+ * The stored left/top/width/height are ALWAYS the restored size, never the
+ * maximised one — a maximised window has no size of its own worth keeping, and
+ * writing it over the record is what makes "restore" restore nothing. So while
+ * maximised only the flag is updated.
+ */
+function saveGeom() {
+  if (isNarrow()) return;                       // phone size is not a choice
+  const v = el.frameview;
+  const maxed = v.classList.contains("max");
+  const g = maxed
+    ? { ...(readGeom() ?? {}) }
+    : { left: v.offsetLeft, top: v.offsetTop, width: v.offsetWidth, height: v.offsetHeight };
+  g.max = maxed;
+  try { localStorage.setItem(GEOM_KEY, JSON.stringify(g)); } catch { /* private mode */ }
+}
+
+/** Put the window back where it was, size AND maximised state. Used on open. */
+function restoreGeom() {
+  const g = readGeom();
+  el.frameview.classList.toggle("max", !!(g && g.max));
+  applyGeom(g);
+}
+
+/** Size and position only, leaving the maximised state alone. */
+function applyGeom(g) {
+  const host = el.frameview.offsetParent || document.body;
+  const W = host.clientWidth || window.innerWidth;
+  const H = host.clientHeight || window.innerHeight;
+  if (!g || typeof g.width !== "number") {
+    // A first open is centred at a size that leaves the pane behind it visible.
+    const w = Math.min(900, Math.round(W * 0.8)), h = Math.min(620, Math.round(H * 0.8));
+    place(Math.round((W - w) / 2), Math.round((H - h) / 2), w, h);
+    return;
+  }
+  place(g.left, g.top, g.width, g.height);
+}
+
+/** Apply a geometry, clamped so the window can never land off-screen. */
+function place(left, top, width, height) {
+  const host = el.frameview.offsetParent || document.body;
+  const W = host.clientWidth || window.innerWidth;
+  const H = host.clientHeight || window.innerHeight;
+  const w = Math.max(WIN_MIN_W, Math.min(width, W));
+  const h = Math.max(WIN_MIN_H, Math.min(height, H));
+  // Keep at least the title bar reachable: a window dragged past the bottom edge
+  // with no bar left to grab is unrecoverable without clearing storage.
+  const v = el.frameview;
+  v.style.width = `${w}px`;
+  v.style.height = `${h}px`;
+  v.style.left = `${Math.max(0, Math.min(left, W - Math.min(w, 80)))}px`;
+  v.style.top = `${Math.max(0, Math.min(top, H - 30))}px`;
+}
+
+function beginGesture(ev, onMove) {
+  const v = el.frameview;
+  if (v.classList.contains("max")) return;      // a maximised window does not move
+  const target = ev.currentTarget;
+  // Capture keeps the gesture alive when the cursor leaves the handle, but it
+  // THROWS for a pointer the browser no longer considers active — and an
+  // exception here would abort before the move listeners were attached, killing
+  // the drag entirely. The gesture works without capture; it just needs the
+  // shield, which is already up.
+  try { target.setPointerCapture(ev.pointerId); } catch { /* pointer already gone */ }
+  document.body.classList.add("winop");
+  const start = {
+    x: ev.clientX, y: ev.clientY,
+    left: v.offsetLeft, top: v.offsetTop, w: v.offsetWidth, h: v.offsetHeight,
+  };
+  const move = (e) => onMove(e.clientX - start.x, e.clientY - start.y, start);
+  const end = () => {
+    target.removeEventListener("pointermove", move);
+    target.removeEventListener("pointerup", end);
+    target.removeEventListener("pointercancel", end);
+    document.body.classList.remove("winop");
+    saveGeom();
+    // The framed client sizes itself to its container, so tell it the container
+    // settled — otherwise a noVNC session only reflows on its next own event.
+    try { el.frame.contentWindow?.dispatchEvent(new Event("resize")); } catch { /* cross-origin */ }
+  };
+  target.addEventListener("pointermove", move);
+  target.addEventListener("pointerup", end);
+  target.addEventListener("pointercancel", end);
+  ev.preventDefault();
+}
+
+el.framebar.addEventListener("pointerdown", (ev) => {
+  // Buttons in the bar are buttons, not drag handles.
+  if (ev.target.closest("button")) return;
+  if (ev.button !== 0 && ev.pointerType === "mouse") return;
+  beginGesture(ev, (dx, dy, s) => place(s.left + dx, s.top + dy, s.w, s.h));
+});
+
+// Double-click the bar to maximise, as every other window manager does.
+el.framebar.addEventListener("dblclick", (ev) => {
+  if (ev.target.closest("button")) return;
+  toggleMax();
+});
+
+for (const h of document.querySelectorAll("#frameview .rz")) {
+  const dir = h.dataset.rz;
+  h.addEventListener("pointerdown", (ev) => beginGesture(ev, (dx, dy, s) => {
+    let { left, top, w, h: hh } = { left: s.left, top: s.top, w: s.w, h: s.h };
+    if (dir.includes("e")) w = s.w + dx;
+    if (dir.includes("s")) hh = s.h + dy;
+    // Dragging a top or left edge moves the origin as well as the size, and the
+    // movement has to stop when the size hits its minimum or the far edge walks.
+    if (dir.includes("w")) { w = Math.max(WIN_MIN_W, s.w - dx); left = s.left + (s.w - w); }
+    if (dir.includes("n")) { hh = Math.max(WIN_MIN_H, s.h - dy); top = s.top + (s.h - hh); }
+    place(left, top, w, hh);
+  }));
+}
+
+function toggleMax() {
+  const v = el.frameview;
+  const going = !v.classList.contains("max");
+  if (going) saveGeom();                        // record where to come back to
+  v.classList.toggle("max", going);
+  // applyGeom, not restoreGeom: the stored record still says max:true at this
+  // point, and restoreGeom would obediently maximise us straight back again.
+  if (!going) applyGeom(readGeom());
+  saveGeom();
+  try { el.frame.contentWindow?.dispatchEvent(new Event("resize")); } catch { /* cross-origin */ }
+}
+el.framemax.onclick = toggleMax;
+
+// A window sized for a wide browser is off-screen in a narrow one; re-clamp.
+window.addEventListener("resize", () => {
+  if (!frameOpen || el.frameview.classList.contains("max")) return;
+  const v = el.frameview;
+  place(v.offsetLeft, v.offsetTop, v.offsetWidth, v.offsetHeight);
 });
 
 /* ------------------------------------------------- input arbitration (human)

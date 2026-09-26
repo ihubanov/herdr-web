@@ -178,12 +178,37 @@
   /* A MODAL over the workspace, not a view that replaces it. The embedded page
      is a thing you glance at and dismiss while staying where you were — losing
      the terminal or chat underneath it to look at a browser is the wrong trade. */
-  #frameview{display:none;position:absolute;inset:14px;z-index:40;
+  /* A real window: moved by its bar, resized from any edge, maximised, closed.
+     Position and size live in inline style so a drag is one style write, and
+     are persisted so the window reopens where you left it. */
+  #frameview{display:none;position:absolute;z-index:40;
+    left:60px;top:60px;width:min(900px,80vw);height:min(600px,75vh);
     flex-direction:column;background:var(--bg);border:1px solid #5c4a1c;
     border-radius:8px;overflow:hidden;box-shadow:0 18px 60px rgba(0,0,0,.6)}
   #frameview.on{display:flex}
-  #framescrim{display:none;position:absolute;inset:0;z-index:39;background:rgba(6,8,12,.55)}
-  #framescrim.on{display:block}
+  #frameview.max{left:0 !important;top:0 !important;
+    width:100% !important;height:100% !important;border-radius:0}
+  #framebar{cursor:move;user-select:none}
+  #frameview.max #framebar{cursor:default}
+
+  /* Eight grab zones. Bigger than they look, because a 1px edge is unusable. */
+  .rz{position:absolute;z-index:2}
+  .rz-n{top:-3px;left:8px;right:8px;height:8px;cursor:ns-resize}
+  .rz-s{bottom:-3px;left:8px;right:8px;height:8px;cursor:ns-resize}
+  .rz-w{left:-3px;top:8px;bottom:8px;width:8px;cursor:ew-resize}
+  .rz-e{right:-3px;top:8px;bottom:8px;width:8px;cursor:ew-resize}
+  .rz-nw{left:-3px;top:-3px;width:14px;height:14px;cursor:nwse-resize}
+  .rz-ne{right:-3px;top:-3px;width:14px;height:14px;cursor:nesw-resize}
+  .rz-sw{left:-3px;bottom:-3px;width:14px;height:14px;cursor:nesw-resize}
+  .rz-se{right:-3px;bottom:-3px;width:14px;height:14px;cursor:nwse-resize}
+  #frameview.max .rz{display:none}
+
+  /* THE trap with draggable iframes: once the pointer crosses into the frame,
+     the iframe's document eats the mousemove and the drag dies mid-gesture.
+     A transparent shield over the frame during a drag keeps the events here. */
+  #frameshield{display:none;position:absolute;inset:0;z-index:3;cursor:inherit}
+  body.winop #frameshield{display:block}
+  body.winop{user-select:none}
   /* The bar is not decoration: agent-controlled content is on screen, so the
      surrounding chrome has to say whose it is and where it came from. */
   #framebar{display:flex;align-items:center;gap:10px;padding:5px 11px;flex:none;
@@ -471,8 +496,13 @@
     .md{font-size:14px}          /* iOS zooms anything under 16px on focus… */
     #cin{font-size:16px}         /* …so the composer must not trigger it */
 
-    /* The embedded view is a modal; on a phone it should use the whole screen. */
-    #frameview{inset:0;border-radius:0;border:0}
+    /* On a desktop the embedded view is a movable window. On a phone there is
+       nowhere to move it TO, and a 300px window on a 390px screen is useless,
+       so it takes the whole screen and the grab zones go away — dragging on a
+       touch screen would fight the page scroll anyway. */
+    #frameview{left:0 !important;top:0 !important;
+      width:100% !important;height:100% !important;border-radius:0;border:0}
+    #frameview .rz{display:none}
 
     #modal .box{width:min(94vw,520px);max-height:86vh;overflow-y:auto}
   }
@@ -516,7 +546,6 @@
     </div>
     <div id="askctx"><div class="q" id="askq"></div><div id="presetrow"></div></div>
     <div id="term"></div>
-    <div id="framescrim"></div>
     <div id="frameview">
       <div id="framebar">
         <span class="lbl">embedded view</span>
@@ -526,13 +555,21 @@
         <button id="locktake">take input</button>
         <button id="lockrelease" style="display:none">release</button>
         <button id="frameopen" title="Open this page in a separate browser tab">pop out</button>
+        <button id="framestop" style="display:none"
+                title="Shut the shared display down — closing this window only hides it">stop sharing</button>
+        <button id="framemax" title="Maximise / restore">▢</button>
         <button id="frameclose" title="Close (Esc)">&times;</button>
       </div>
-      <!-- NO allow-same-origin. The shared display is now served through this
-           same origin, and allow-same-origin on a same-origin frame is a sandbox
-           escape: the framed page could reach into this document. Dropping it
-           gives the frame an opaque origin, which is what the guard that refuses
-           to frame our own origin was protecting against. -->
+      <!-- The sandbox here is only the default for a foreign page; openFrame()
+           rewrites it per URL. Our own proxied shim needs allow-same-origin (an
+           opaque origin makes its ES module import cross-origin and the auth
+           cookie is dropped, so the frame loads nothing, silently); an
+           agent-advertised URL never gets it. -->
+      <div id="frameshield"></div>
+      <div class="rz rz-n" data-rz="n"></div><div class="rz rz-s" data-rz="s"></div>
+      <div class="rz rz-w" data-rz="w"></div><div class="rz rz-e" data-rz="e"></div>
+      <div class="rz rz-nw" data-rz="nw"></div><div class="rz rz-ne" data-rz="ne"></div>
+      <div class="rz rz-sw" data-rz="sw"></div><div class="rz rz-se" data-rz="se"></div>
       <iframe id="frame" sandbox="allow-scripts allow-forms"
               referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
     </div>

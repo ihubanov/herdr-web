@@ -70,7 +70,14 @@ function setLock(state) {
 try {
   const wsUrl = `${proto}://${location.host}${wsPath.startsWith('/') ? '' : '/'}${wsPath}`;
   rfb = new RFB(screenEl, wsUrl, {});
-  rfb.scaleViewport = qs.get('resize') !== 'off';
+  // Two different meanings of "resize", and the window chrome wants the second:
+  //   scaleViewport  — stretch a fixed remote screen to fit the frame
+  //   resizeSession  — ask the SERVER to change the desktop size to match
+  // With RANDR on the Xvfb and -xrandr on x11vnc, resizeSession makes dragging
+  // the window edge reflow the guest instead of scaling a blurry picture of it.
+  const mode = qs.get('resize') || 'remote';
+  rfb.resizeSession = mode === 'remote';
+  rfb.scaleViewport = mode === 'scale';
   rfb.clipViewport = false;
   rfb.viewOnly = true;                 // until told otherwise
   rfb.addEventListener('disconnect', (e) => {
