@@ -781,7 +781,22 @@ const server = Bun.serve<WsData>({
           h.onFrame((f) => {
             // Augment only the ready frame, and only when we found something to
             // offer. An agent that sends its own historyFrom keeps it.
-            if (anchor > 0 && f?.type === "ready" && f.historyFrom === undefined) {
+            //
+            // AND only when the agent replayed NOTHING. from_seq=0 asks for the
+            // whole buffer, so a pane whose agent has been running replays
+            // frames that are ALSO in the transcript below this anchor — paging
+            // back would then show the messages already on screen a second time.
+            // ready.seq is the high-water mark of that replay, so seq 0 means
+            // the buffer was empty and the anchor is exactly the boundary.
+            //
+            // The cost is that a resumed pane loses its history again once it
+            // has taken a turn. That is the honest trade: there is no id shared
+            // between a transcript record and a live frame to deduplicate on,
+            // and inventing one is a contract across two codebases that would
+            // drift silently. Showing nothing is recoverable; showing a
+            // conversation twice is a bug the user has to interpret.
+            const replayed = Number(f?.seq ?? 0) > 0;
+            if (anchor > 0 && !replayed && f?.type === "ready" && f.historyFrom === undefined) {
               f = { ...f, historyFrom: anchor };
             }
             try { ws.send(JSON.stringify(f)); } catch {}
