@@ -17,7 +17,10 @@ import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const ROOT = join(homedir(), ".claude", "projects");
+// Same root bridge.ts uses for titles: a CLAUDE_CONFIG_DIR agent (claude-local) keeps its
+// transcripts there, not under ~/.claude — with the old constant the picker listed a
+// conversation's title but the pane could never find its history.
+const ROOT = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
 
 /** Record types that are Claude Code bookkeeping, not conversation. */
 const SKIP = new Set([
