@@ -23,10 +23,14 @@ if (!paneId) {
   process.exit(1);
 }
 
-const SESSION = `mock-${process.pid}`;
+// Optional second argument: the session id to advertise. Defaults to a synthetic
+// one. Passing a REAL transcript id is how the resumed-pane case is exercised —
+// a live stream whose conversation also exists on disk, which is the shape a
+// resumed agent has and the one the history anchor exists for.
+const SESSION = process.argv[3] || `mock-${process.pid}`;
 const dir = join(process.env.XDG_RUNTIME_DIR || "/tmp", "herdr-agent-stream");
 mkdirSync(dir, { recursive: true, mode: 0o700 });
-const sockPath = join(dir, `${SESSION}.sock`);
+const sockPath = join(dir, `mock-${process.pid}.sock`);   // never derived from a real id
 if (existsSync(sockPath)) unlinkSync(sockPath);
 
 /**

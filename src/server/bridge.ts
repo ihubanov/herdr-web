@@ -9,7 +9,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, writeFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, extname, normalize } from "node:path";
 import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
@@ -757,9 +757,35 @@ const server = Bun.serve<WsData>({
             });
             return;
           }
+          // A live stream carries no history: the agent sends what happens from
+          // now on. For a RESUMED conversation that is most of it — the prior
+          // messages are on disk and the pane would render as if the session had
+          // just begun. So if the pane names a session we can find a transcript
+          // for, anchor history at the file's size AT CONNECT TIME and let the
+          // client page backwards through it exactly as it does for a
+          // transcript-backed pane. Everything before that offset is history;
+          // everything the stream sends is live.
+          //
+          // The client already understands `historyFrom` on a ready frame — this
+          // is the half that was missing, and it was missing on our side of the
+          // socket, not the agent's.
+          let anchor = 0;
+          try {
+            const sid2 = sessionIdFor((await call("pane.get", { pane_id: d.paneId! }))?.pane);
+            const p2 = sid2 ? await findTranscript(sid2) : null;
+            if (p2) anchor = (await stat(p2)).size;
+          } catch { /* no transcript for this pane: nothing to page back through */ }
+
           const h = openStream(cap, { fromSeq: 0, client: `herdr-web/${d.who}` });
           d.stream = h;
-          h.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
+          h.onFrame((f) => {
+            // Augment only the ready frame, and only when we found something to
+            // offer. An agent that sends its own historyFrom keeps it.
+            if (anchor > 0 && f?.type === "ready" && f.historyFrom === undefined) {
+              f = { ...f, historyFrom: anchor };
+            }
+            try { ws.send(JSON.stringify(f)); } catch {}
+          });
           h.onClose((reason) => {
             try { ws.send(JSON.stringify({ type: "_closed", reason })); ws.close(1000, reason); } catch {}
           });
