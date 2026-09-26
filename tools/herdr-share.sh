@@ -106,17 +106,28 @@ case "${1:-status}" in
     ;;
 
   browser)
-    # Pick a display/port from the pane id so two panes never collide.
-    N=$(( ( $(printf '%s' "$PANE" | cksum | cut -d' ' -f1) % 40 ) + 50 ))
-    "$HERE/shared-browser.sh" --display "$N" --port $(( 6900 + N )) >/dev/null 2>&1 || \
-      die "shared-browser.sh failed — run it directly to see why."
-    sleep 2
-    advertise "http://127.0.0.1:$(( 6900 + N ))/shared.html?resize=scale"
-    echo "drive it: DISPLAY=:${N}, or CDP through the gate on 127.0.0.1:$(( 9400 + N ))"
+    # Delegate to the bridge rather than starting the display here. This used to
+    # pick its own display number — from cksum, where the bridge used a different
+    # hash — so the same pane got TWO different displays depending on whether the
+    # browser was started from here, from the herdr-web button, or over MCP, and
+    # a stop from one could not find what the other had started.
+    body="$(curl -sS -m 90 -X POST -H 'content-type: application/json' \
+      -d "{\"pane_id\":\"${PANE}\",\"action\":\"browser\"${2:+,\"url\":\"$2\"}}" \
+      "${WEB}/api/share${TOKEN:+?token=$TOKEN}" 2>/dev/null)" \
+      || die "could not reach herdr-web on ${WEB} — is the bridge running?"
+    printf '%s' "$body" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get('error'):
+    print('FAILED:', d['error'], file=sys.stderr); sys.exit(1)
+print('showing:', d.get('iframe_url') or '(advertised, but herdr-web did not accept it)')
+if d.get('iframe_rejected'): print('REFUSED:', d['iframe_rejected'], file=sys.stderr)
+print('drive it: CDP through the gate on 127.0.0.1:%s' % d.get('cdp_gate_port'))
+print('          (or DISPLAY=:%s for X tools)' % d.get('display'))
+"
     echo "the gate refuses until you hold input:"
     echo "  $HERE/input-lock.sh claim --pane $PANE --label 'what you are doing'"
     echo "  $HERE/input-lock.sh release --pane $PANE"
-    [ $# -ge 2 ] && echo "open $2 in it once you hold the lock."
     ;;
 
   status)
@@ -131,13 +142,16 @@ if d.get('iframeRejected'): print('refused:', d['iframeRejected'])
     ;;
 
   stop)
+    # Also through the bridge: it knows which display belongs to this pane, where
+    # the old loop here just tried all forty and would have stopped another
+    # pane's display as readily as this one's.
+    curl -sS -m 30 -X POST -H 'content-type: application/json' \
+      -d "{\"pane_id\":\"${PANE}\",\"action\":\"stop\"}" \
+      "${WEB}/api/share${TOKEN:+?token=$TOKEN}" >/dev/null 2>&1 \
+      || die "could not reach herdr-web on ${WEB} — is the bridge running?"
     "$HERDR" pane report-metadata "$PANE" --source herdr-share \
       --clear-token iframe_url >/dev/null 2>&1 || true
-    for n in $(seq 50 89); do
-      [ -e "${XDG_RUNTIME_DIR:-/tmp}/herdr-novnc-${n}" ] && \
-        "$HERE/shared-browser.sh" --stop --display "$n" >/dev/null 2>&1 || true
-    done
-    echo "stopped advertising"
+    echo "stopped advertising, and stopped the shared display if one was running"
     ;;
 
   *) sed -n '2,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2;;

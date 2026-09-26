@@ -278,10 +278,58 @@ Appium/WebDriver. The shared surface is the display, not the iframe — which is
 why both sides genuinely see and act on one GUI, something a plain iframe cannot
 give you (the agent has no eyes in your browser).
 
-Both listeners bind loopback only. Two traps worth knowing: x11vnc exits with
-"Wayland display server detected" unless `WAYLAND_DISPLAY` is cleared, even when
-the target is a plain X11 Xvfb; and both x11vnc and websockify bind every
-interface unless told otherwise, which would put a live desktop on the network.
+Both listeners bind loopback only. Traps worth knowing, each of which cost a
+debugging session here: x11vnc exits with "Wayland display server detected"
+unless `WAYLAND_DISPLAY` is cleared, even when the target is a plain X11 Xvfb;
+both x11vnc and websockify bind every interface unless told otherwise, which
+would put a live desktop on the network; and **Chrome needs `XDG_SESSION_TYPE`
+cleared as well as `WAYLAND_DISPLAY`** — with it set, ozone auto-detect ignores
+`DISPLAY` entirely and the window opens on the user's real desktop while the
+virtual display stays black.
+
+The display cannot be resized by the client: Xvfb fixes its RANDR maximum at the
+size it started with. The script probes for that and tells the viewer to scale
+instead, which is why the default geometry is a generous 1600x1000 — most window
+sizes then scale *down*, and stay sharp.
+
+Don't start it directly from application code. `POST /api/share` is the one code
+path the window button, `herdr-share.sh` and the MCP tools all go through; it
+picks the display number, and three callers each picking their own is how one
+pane ended up with two displays that could not stop each other.
+
+### For agents: `tools/mcp-server.ts`
+
+The same thing as MCP tools, so a model reads the rules *before* it acts rather
+than after it has tried something that cannot work:
+
+```bash
+claude mcp add herdr-view -- bun /path/to/herdr-web/tools/mcp-server.ts
+```
+
+or in `.mcp.json`:
+
+```json
+{ "mcpServers": { "herdr-view": {
+    "command": "bun", "args": ["/path/to/herdr-web/tools/mcp-server.ts"] } } }
+```
+
+| tool | what it does |
+| --- | --- |
+| `show_url` | put a page you are already serving in the user's window |
+| `open_shared_browser` | start the kiosk browser and show it; returns the **gate** address |
+| `take_input` / `release_input` | the input lock, which the CDP gate enforces |
+| `view_status` | what is being shown, and who holds input |
+| `close_view` | stop showing, and shut the display down |
+
+It needs `HERDR_PANE_ID` to know which pane it is acting on — herdr sets that in
+every pane it spawns — and reads the port and token from herdr-web's own plugin
+config. Tools that fail return the reason **as the tool result**, not as a
+protocol error, so the model can read "only loopback URLs allowed" and adapt
+instead of seeing a broken tool.
+
+`open_shared_browser` hands back the CDP **gate** port, never the browser's own
+debugging port. That is the whole point of the gate: an agent that ignores the
+input lock cannot connect at all, rather than being asked nicely not to.
 
 ## Chat view
 

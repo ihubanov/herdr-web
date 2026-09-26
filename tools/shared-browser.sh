@@ -77,6 +77,30 @@ stop() {
   fi
   echo "stopped display :${DISPLAY_N}"
 }
+# Serialise per display, over BOTH paths. Two concurrent starts — a user pressing
+# the button while an agent calls the API — otherwise interleave, and the second
+# one's restart tears down the stack the first is still building; a stop landing
+# mid-start does the same from the other direction.
+#
+# A DIRECTORY, not flock. This script's whole job is to leave long-lived children
+# running, and they inherit the fd that flock holds the lock on — so the lock is
+# still held by Xvfb and a browser long after the script exits, and the next run
+# waits the full timeout and gives up. A mkdir is atomic, holds nothing open, and
+# a lock left by a crash is recognisable because the pid inside it is gone.
+LOCKD="${XDG_RUNTIME_DIR:-/tmp}/herdr-share-${DISPLAY_N}.lock.d"
+for _ in $(seq 60); do
+  if mkdir "$LOCKD" 2>/dev/null; then LOCKED=1; break; fi
+  owner="$(cat "$LOCKD/pid" 2>/dev/null || true)"
+  if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+    rm -rf "$LOCKD"                              # the holder died; the lock is stale
+    continue
+  fi
+  sleep 1
+done
+[ "${LOCKED:-0}" = 1 ] || { echo "another shared-browser run holds :${DISPLAY_N}" >&2; exit 1; }
+printf '%s' "$$" > "$LOCKD/pid"
+trap 'rm -rf "$LOCKD" 2>/dev/null || true' EXIT
+
 [ "$STOP" = 1 ] && { stop; exit 0; }
 
 # Starting on a display that is already up does not fail cleanly: Xvfb refuses,
@@ -121,8 +145,15 @@ env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
   -nopw -forever -shared -bg -quiet >/dev/null 2>&1
 # -bg makes x11vnc fork, so $! is the parent that already exited. Identify the
 # daemon by the port it owns: exact, and it can match nothing else.
-X11VNC_PID="$(ss -ltnpH 2>/dev/null | awk -v p=":${VNC_PORT}$" '$4 ~ p {
-    if (match($0, /pid=[0-9]+/)) { print substr($0, RSTART+4, RLENGTH-4); exit } }')"
+# No `exit` in the awk, and `|| true` on the assignment. An awk that exits early
+# closes the pipe under its writer, the writer takes SIGPIPE, and with
+# `set -o pipefail` the whole substitution returns 141 and `set -e` kills this
+# script — non-deterministically, because it depends on whether the writer had
+# finished. That is what made a restart fail roughly half the time with nothing
+# but the first line of output to show for it.
+X11VNC_PID="$(ss -ltnpH 2>/dev/null | awk -v p=":${VNC_PORT}$" '
+    $4 ~ p && !got && match($0, /pid=[0-9]+/) { print substr($0, RSTART+4, RLENGTH-4); got=1 }' \
+  || true)"
 note_pid "${X11VNC_PID:-}"
 
 # The page we serve is OUR shim, not noVNC's stock vnc.html, because input
@@ -149,11 +180,12 @@ sleep 1
 # that asks for a resize the server refuses just shows black margins.
 RESIZE_MODE=scale
 if command -v xrandr >/dev/null; then
+  # Same SIGPIPE rule as above: match without exiting early.
   read -r CUR_W MAX_W <<<"$(DISPLAY=":${DISPLAY_N}" xrandr -q 2>/dev/null | awk '
-    /^Screen/ { for (i=1;i<=NF;i++) {
-                  if ($i == "current") cur=$(i+1);
-                  if ($i == "maximum") max=$(i+1) }
-                gsub(/,/,"",cur); print cur+0, max+0; exit }')"
+    /^Screen/ && !got { for (i=1;i<=NF;i++) {
+                          if ($i == "current") cur=$(i+1);
+                          if ($i == "maximum") max=$(i+1) }
+                        gsub(/,/,"",cur); print cur+0, max+0; got=1 }' || true)"
   [ "${MAX_W:-0}" -gt "${CUR_W:-0}" ] 2>/dev/null && RESIZE_MODE=remote
 fi
 URL="http://127.0.0.1:${WS_PORT}/shared.html?resize=${RESIZE_MODE}"
@@ -215,7 +247,7 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
         ( last=""
           while sleep 1; do
             DISPLAY=":${DISPLAY_N}" xdpyinfo >/dev/null 2>&1 || exit 0
-            cur="$(DISPLAY=":${DISPLAY_N}" xdpyinfo | awk '/dimensions:/{print $2; exit}')"
+            cur="$(DISPLAY=":${DISPLAY_N}" xdpyinfo | awk '/dimensions:/ && !got {print $2; got=1}' || true)"
             [ "$cur" = "$last" ] && continue
             last="$cur"
             w="${cur%%x*}"; h="${cur#*x}"
