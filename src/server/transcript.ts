@@ -160,7 +160,7 @@ export interface TranscriptHandle {
  */
 export function followTranscript(
   path: string,
-  opts: { tailBytes?: number; intervalMs?: number; session?: string } = {},
+  opts: { tailBytes?: number; intervalMs?: number; session?: string; agent?: string } = {},
 ): TranscriptHandle {
   const tailBytes = opts.tailBytes ?? 512 * 1024;
   const intervalMs = opts.intervalMs ?? 800;
@@ -205,7 +205,11 @@ export function followTranscript(
       // `seq` is a HIGH-WATER MARK covering that backlog, so the client treats
       // it as history and does not start a turn clock for a finished conversation.
       emit({
-        type: "ready", proto: 1, agent: "claude", session: opts.session,
+        // The agent NAME as herdr detected it, not a guess. Hardcoding "claude"
+        // told a claude-local user they were "connected to claude", which is
+        // both wrong and confusing now that herdr's detection distinguishes the
+        // two. Falls back only when the caller has nothing to pass.
+        type: "ready", proto: 1, agent: opts.agent || "claude", session: opts.session,
         seq: backlog.length, source: "transcript",
         // Where this backlog began; 0 means the whole file is already shown.
         historyFrom: startOffset,

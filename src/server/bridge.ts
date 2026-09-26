@@ -629,16 +629,18 @@ const server = Bun.serve<WsData>({
           const cap = await detectStream(d.paneId!);
           if (!cap) {
             // Fall back to the on-disk transcript before giving up.
-            let path: string | null = null, sid = "";
+            let path: string | null = null, sid = "", paneAgent = "";
             try {
-              sid = (await call("pane.get", { pane_id: d.paneId! }))?.pane?.agent_session?.value ?? "";
+              const pane = (await call("pane.get", { pane_id: d.paneId! }))?.pane;
+              sid = pane?.agent_session?.value ?? "";
+              paneAgent = String(pane?.agent ?? "");
               if (sid) path = await findTranscript(sid);
             } catch { /* pane vanished */ }
             if (!path) {
               try { ws.send(JSON.stringify({ type: "_nostream" })); ws.close(1000, "no stream"); } catch {}
               return;
             }
-            const t = followTranscript(path, { session: sid });
+            const t = followTranscript(path, { session: sid, agent: paneAgent });
             d.tail = t;
             t.onFrame((f) => { try { ws.send(JSON.stringify(f)); } catch {} });
             t.onClose((reason) => {

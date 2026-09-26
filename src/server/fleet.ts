@@ -86,7 +86,7 @@ async function previewFor(paneId: string, revision: unknown): Promise<string[] |
 
 /** Titles agents set when they have nothing specific to say. */
 const GENERIC_TITLES = new Set([
-  "claude code", "claude", "codex", "copilot", "cursor", "droid", "grok",
+  "claude code", "claude", "claude-local", "codex", "copilot", "cursor", "droid", "grok",
   "opencode", "qwen", "devin", "shell", "bash", "zsh", "fish",
 ]);
 
