@@ -287,8 +287,9 @@ cleared as well as `WAYLAND_DISPLAY`** — with it set, ozone auto-detect ignore
 `DISPLAY` entirely and the window opens on the user's real desktop while the
 virtual display stays black.
 
-The display cannot be resized by the client: Xvfb fixes its RANDR maximum at the
-size it started with. The script probes for that and tells the viewer to scale
+The display cannot be resized at all once running — not by the client, and not
+by an agent over CDP, where a resize reports success and changes nothing. Xvfb
+fixes its RANDR maximum at the size it started with. The script probes for that and tells the viewer to scale
 instead, which is why the default geometry is a generous 1600x1000 — most window
 sizes then scale *down*, and stay sharp.
 
@@ -320,6 +321,14 @@ or in `.mcp.json`:
 | `take_input` / `release_input` | the input lock, which the CDP gate enforces |
 | `view_status` | what is being shown, and who holds input |
 | `close_view` | stop showing, and shut the display down |
+
+An advertisement **stays up until it is replaced or closed**. The pane token
+carries a 5-minute TTL so a crashed session's view expires by itself, and the
+bridge renews it for as long as the pane exists. That distinction matters to the
+caller: a TTL is a safety property of the mechanism, but an unrenewed one is a
+deadline nobody told them about — "here is the report I built for you", then it
+vanishes five minutes later and the button looks broken. Renewal stops when the
+pane goes away, or when something else takes the slot.
 
 It needs `HERDR_PANE_ID` to know which pane it is acting on — herdr sets that in
 every pane it spawns — and reads the port and token from herdr-web's own plugin

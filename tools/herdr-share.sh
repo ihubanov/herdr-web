@@ -44,7 +44,6 @@ WEB="${WEB%/}"
 # substitution inside an assignment aborts the script under `set -e`.
 TOKEN="${HERDR_WEB_TOKEN:-$(_cfg HERDR_WEB_TOKEN || true)}"
 PANE="${HERDR_PANE_ID:-}"
-TTL=300000
 
 die() { echo "herdr-share: $*" >&2; exit 1; }
 [ -n "$PANE" ] || die "no HERDR_PANE_ID — run this inside a herdr pane."
@@ -58,51 +57,27 @@ cap() {
   [ -n "$body" ] && echo "$body" || echo '{}'
 }
 
-# Advertise, then read back what herdr-web made of it. Reporting the refusal is
-# the point: the policy lives in the bridge, and an agent that is told "refused,
-# because X" can act, where silence just looks broken.
-advertise() {
-  local url="$1"
-  "$HERDR" pane report-metadata "$PANE" --source herdr-share \
-    --token "iframe_url=${url}" --ttl-ms "$TTL" >/dev/null 2>&1 \
-    || die "could not set the pane token (is the herdr socket reachable?)"
-  sleep 1
-  local out; out="$(cap)"
-  python3 - "$out" "$url" <<'PY'
-import json, sys
-try: d = json.loads(sys.argv[1])
-except Exception: d = {}
-url = sys.argv[2]
-if d.get("iframe"):
-    print(f"showing: {d['iframe']['url']}")
-    print("The user opens it from the embedded-view button in herdr-web.")
-    sys.exit(0)
-why = d.get("iframeRejected")
-pol = d.get("iframePolicy")
-if why:
-    print(f"REFUSED: {why}", file=sys.stderr)
-elif pol == "off":
-    print("REFUSED: embedded views are disabled (HERDR_WEB_IFRAMES=off).", file=sys.stderr)
-elif pol == "loopback" and not any(h in url for h in ("127.0.0.1", "localhost", "[::1]")):
-    print(f"REFUSED: policy is 'loopback' and {url} is not a loopback URL.", file=sys.stderr)
-elif d.get("_unverified"):
-    # The token was missing or wrong. The advertisement itself already went in;
-    # only the read-back failed, so do not call this a refusal.
-    print(f"advertised: {url}", file=sys.stderr)
-    print("could not confirm it (herdr-web needs a token to read capability). "
-          "Check the embedded-view button in herdr-web.", file=sys.stderr)
-    sys.exit(0)
-else:
-    print("REFUSED: herdr-web did not accept it and gave no reason "
-          "(is the bridge running?).", file=sys.stderr)
-sys.exit(1)
-PY
-}
-
 case "${1:-status}" in
   url)
     [ $# -ge 2 ] || die "usage: herdr-share url <URL>"
-    advertise "$2"
+    # Through the bridge, not straight at the pane token. Writing the token here
+    # worked, but it was written ONCE with a 5-minute TTL and nothing renewed it,
+    # so "here is the report I built for you" quietly disappeared five minutes
+    # later and looked like a broken feature. The bridge renews it for as long as
+    # the pane exists.
+    body="$(curl -sS -m 20 -X POST -H 'content-type: application/json' \
+      -d "{\"pane_id\":\"${PANE}\",\"action\":\"url\",\"url\":\"$2\"}" \
+      "${WEB}/api/share${TOKEN:+?token=$TOKEN}" 2>/dev/null)" \
+      || die "could not reach herdr-web on ${WEB} — is the bridge running?"
+    printf '%s' "$body" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+if d.get('error'):
+    print('REFUSED:', d['error'], file=sys.stderr); sys.exit(1)
+print('showing:', d.get('url'))
+print('The user opens it from the embedded-view button in herdr-web.')
+print('It stays up until you run: herdr-share stop')
+"
     ;;
 
   browser)

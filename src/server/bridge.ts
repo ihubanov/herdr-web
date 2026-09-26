@@ -58,6 +58,43 @@ const DEFAULT_LAUNCH_CMD = (process.env.HERDR_WEB_DEFAULT_LAUNCH_CMD || "").trim
 const ALT_UI_URL = (process.env.HERDR_WEB_ALT_UI_URL || "").trim();
 const ALT_UI_LABEL = (process.env.HERDR_WEB_ALT_UI_LABEL || "Classic UI").trim();
 
+/**
+ * Passthrough: URL prefixes owned by ANOTHER local server on this host, proxied verbatim — e.g.
+ * the classic beast-server UI under /v1/ and /sage-ui/ so one public hostname can front both
+ * front ends. These requests bypass this bridge's token check entirely (the upstream has its
+ * own authentication) and are streamed as-is, so SSE works. Format:
+ *   HERDR_WEB_PASSTHROUGH="/v1/=http://127.0.0.1:8787,/sage-ui/=http://127.0.0.1:8787"
+ * Only http(s) upstreams; WebSocket upgrades are not proxied (the classic UI uses SSE).
+ */
+const PASSTHROUGH: Array<[string, string]> = (process.env.HERDR_WEB_PASSTHROUGH || "")
+  .split(",").map((s) => s.trim()).filter(Boolean)
+  .map((p): [string, string] => { const i = p.indexOf("="); return [p.slice(0, i).trim(), p.slice(i + 1).trim().replace(/\/$/, "")]; })
+  .filter(([prefix, up]) => prefix.startsWith("/") && /^https?:\/\//.test(up));
+
+async function passthrough(req: Request): Promise<Response | null> {
+  if (PASSTHROUGH.length === 0) return null;
+  const url = new URL(req.url);
+  const hit = PASSTHROUGH.find(([prefix]) => url.pathname === prefix.replace(/\/$/, "") || url.pathname.startsWith(prefix));
+  if (!hit) return null;
+  const headers = new Headers(req.headers);
+  for (const h of ["host", "connection", "keep-alive", "transfer-encoding", "upgrade", "proxy-connection", "te", "trailer", "accept-encoding"]) headers.delete(h);
+  headers.set("x-forwarded-host", url.host);
+  headers.set("x-forwarded-proto", url.protocol.replace(":", ""));
+  const init: RequestInit & { duplex?: "half" } = { method: req.method, headers, redirect: "manual" };
+  if (req.method !== "GET" && req.method !== "HEAD") { init.body = req.body; init.duplex = "half"; }
+  let up: Response;
+  try { up = await fetch(hit[1] + url.pathname + url.search, init as RequestInit); }
+  catch (e) { return new Response(`upstream ${hit[1]} unreachable: ${String(e).slice(0, 120)}`, { status: 502 }); }
+  const rh = new Headers(up.headers);
+  // fetch() already decoded any content-encoding; the length no longer matches either.
+  for (const h of ["connection", "keep-alive", "transfer-encoding", "content-encoding", "content-length"]) rh.delete(h);
+  return new Response(up.body, { status: up.status, statusText: up.statusText, headers: rh });
+}
+
+/** Where an UNauthenticated visit to "/" goes instead of a bare 401 — e.g. the classic UI's path when
+ *  this bridge has taken over a hostname whose old bookmarks people still hold. Unset = 401 as before. */
+const UNAUTH_REDIRECT = (process.env.HERDR_WEB_UNAUTH_REDIRECT || "").trim();
+
 /** Which view a pane opens in before the person has chosen: "chat" (default) or "terminal". */
 const DEFAULT_VIEW = (process.env.HERDR_WEB_DEFAULT_VIEW || "chat").trim() === "terminal" ? "terminal" : "chat";
 
@@ -240,6 +277,59 @@ async function iframeForPane(
   }
 }
 
+/** The pane token TTL. Short on purpose: a crashed session's view expires. */
+const ADVERTISE_TTL_MS = 300_000;
+const ADVERTISE_REFRESH_MS = 120_000;
+
+function advertise(paneId: string, url: string): Promise<unknown> {
+  return call("pane.report_metadata", {
+    pane_id: paneId, source: "herdr-web",
+    tokens: { iframe_url: url }, ttl_ms: ADVERTISE_TTL_MS,
+  });
+}
+
+/**
+ * Keep a pane's advertisement alive for as long as the pane is.
+ *
+ * The token carries a TTL so a crashed session's view expires by itself. That
+ * is right for the MECHANISM and wrong for the CALLER: an agent that says "here
+ * is the report I built" and then carries on working has silently taken it away
+ * five minutes later, with nothing anywhere to explain why the button vanished.
+ * From the caller's side a TTL is not a safety property, it is a deadline they
+ * were never told about.
+ *
+ * So the bridge renews it. The bridge is the long-lived process that already
+ * knows whether the pane still exists, which makes it the only honest place for
+ * this — a refresher inside the calling agent dies with the agent, and one in a
+ * detached shell outlives the thing it is advertising.
+ */
+const advertised = new Map<string, { url: string; timer: ReturnType<typeof setInterval> }>();
+
+function stopAdvertising(paneId: string): void {
+  const e = advertised.get(paneId);
+  if (!e) return;
+  clearInterval(e.timer);
+  advertised.delete(paneId);
+}
+
+function keepAdvertised(paneId: string, url: string): void {
+  stopAdvertising(paneId);                        // replacing, not stacking
+  const timer = setInterval(async () => {
+    try {
+      // Stop if the pane is gone, or if somebody else has taken the slot: two
+      // renewers fighting over one token is the bug this replaced, from the
+      // other direction.
+      const pane = (await call("pane.get", { pane_id: paneId }))?.pane;
+      const current = String(pane?.tokens?.iframe_url ?? "");
+      if (!pane || (current && current !== url)) { stopAdvertising(paneId); return; }
+      await advertise(paneId, url);
+    } catch {
+      stopAdvertising(paneId);                    // pane vanished, or herdr is down
+    }
+  }, ADVERTISE_REFRESH_MS);
+  advertised.set(paneId, { url, timer });
+}
+
 async function sharedTarget(paneId: string): Promise<URL | null> {
   try {
     const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
@@ -371,6 +461,18 @@ const server = Bun.serve<WsData>({
   port: PORT,
 
   async fetch(req, srv) {
+
+    // Another local server's URL space: proxied before ANY of this bridge's gates apply.
+
+    const proxied = await passthrough(req);
+
+    if (proxied) return proxied;
+
+    if (UNAUTH_REDIRECT && new URL(req.url).pathname === "/" && !authed(req)) {
+
+      return Response.redirect(UNAUTH_REDIRECT, 302);
+
+    }
     // Claim-on-first-use, enforced before routing so it covers websockets too.
     const pin = pinGate(req);
     if (pin.deny) {
@@ -1031,15 +1133,15 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
           if (!v.ok) return Response.json({ error: v.reason }, { status: 400 });
           try {
-            await call("pane.report_metadata", {
-              pane_id: paneId, source: "herdr-web",
-              tokens: { iframe_url: v.url }, ttl_ms: 300_000,
-            });
+            await advertise(paneId, v.url);
+            keepAdvertised(paneId, v.url);
             return Response.json({ ok: true, url: v.url });
           } catch (e: any) {
             return Response.json({ error: e?.message ?? "could not advertise" }, { status: 502 });
           }
         }
+
+        if (action === "stop") stopAdvertising(paneId);
 
         if (action === "browser" || action === "stop") {
           const script = join(tools, "shared-browser.sh");

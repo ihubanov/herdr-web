@@ -121,7 +121,9 @@ const TOOLS: Tool[] = [
       "policy is normally loopback-only, so a public URL will be refused — you " +
       "are told why, immediately, rather than nothing appearing.\n" +
       "This CANNOT show a browser window on the user's real desktop: there is no " +
-      "surface to stream. For that, use open_shared_browser.",
+      "surface to stream. For that, use open_shared_browser.\n" +
+      "It stays up until you replace it or call close_view — you do not have to " +
+      "keep re-sending it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -147,7 +149,11 @@ const TOOLS: Tool[] = [
       "You cannot drive it until you hold the input lock: the CDP gate refuses " +
       "to forward otherwise, so call take_input first. Connect to the returned " +
       "cdp_url, never to the browser's own debugging port.\n" +
-      "Starting it again on the same pane restarts it, it does not stack.",
+      "Starting it again on the same pane restarts it, it does not stack.\n" +
+      "The display CANNOT BE RESIZED once running: a CDP resize or a larger " +
+      "viewport will report success and change nothing, because the virtual " +
+      "screen is fixed at the size it started with. Pass `geometry` up front if " +
+      "the default 1600x1000 is wrong for what you are about to do.",
     inputSchema: {
       type: "object",
       properties: {
