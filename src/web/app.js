@@ -1080,6 +1080,10 @@ function openModal({ title, sub, fields, okLabel = "create", danger = false, onO
       // Boolean toggle (e.g. --dangerously-skip-permissions). Default from f.value.
       return `<label class="mcheck"><input type="checkbox" id="f_${f.k}"${f.value ? " checked" : ""} /> ${esc(f.label)}</label>`;
     }
+    if (f.type === "select") {
+      const opts = (f.options || []).map((o) => `<option value="${esc(o.v)}"${o.v === (f.value ?? "") ? " selected" : ""}>${esc(o.t)}</option>`).join("");
+      return `<label for="f_${f.k}">${esc(f.label)}</label><select id="f_${f.k}">${opts}</select>`;
+    }
     if (f.type === "static") {
       // Read-only display — a locked value the user cannot edit. The value is
       // carried in data-val so the submit handler still reads it back.
@@ -1123,9 +1127,24 @@ el.modal.onclick = (e) => { if (e.target === el.modal) closeModal(); };
 // ---- structure actions ------------------------------------------------------
 function spaceOf(wsId) { return fleet.find((f) => f.workspace_id === wsId); }
 
-function newSession(wsId) {
+async function newSession(wsId) {
   const ref = spaceOf(wsId);
   const base = (me?.defaultLaunchCmd || "").trim();
+  // Existing conversations (HERDR_WEB_RESUME): offered as a select on top of the dialog.
+  let resumeField = [];
+  if (me?.resume) {
+    try {
+      const r = await fetch(auth("/api/sessions"));
+      const list = r.ok ? (await r.json()).sessions || [] : [];
+      if (list.length) {
+        const when = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
+        resumeField = [{ k: "resume", label: "conversation", type: "select", value: "", options: [
+          { v: "", t: "start a new conversation" },
+          ...list.map((s) => ({ v: s.id, t: `${s.title || s.id.slice(0, 8)}  ·  ${s.messages} msgs  ·  ${when(s.last_activity_at)}${s.busy ? "  ·  BUSY" : ""}` })),
+        ] }];
+      }
+    } catch { /* the picker is optional; the dialog still works without it */ }
+  }
   // Locked mode (HERDR_WEB_LOCK_LAUNCH): the launch command is fixed to `base`,
   // and the only choice is whether to add --dangerously-skip-permissions. Needs
   // a base to lock TO — with none, fall back to the editable field so the dialog
@@ -1142,22 +1161,36 @@ function newSession(wsId) {
       ];
   openModal({
     title: "New session",
-    sub: `A new tab in ${ref?.workspace_label ?? wsId}. It starts a shell in this directory; run your agent there.`,
+    sub: locked
+      ? `A new card in ${ref?.workspace_label ?? wsId}. It starts ${me?.agentName || "the agent"}${resumeField.length ? " — new, or continuing a conversation you pick" : ""}.`
+      : `A new tab in ${ref?.workspace_label ?? wsId}. It starts a shell in this directory; run your agent there.`,
     fields: [
+      ...resumeField,
       { k: "cwd", label: "working directory", value: ref?.cwd || "", placeholder: "/path/to/repo" },
       { k: "label", label: "name (optional)", value: "", placeholder: "leave blank to auto-name" },
       ...cmdFields,
     ],
     onOK: async (v) => {
       if (!v.cwd) throw new Error("working directory is required");
+      // Resuming: never open the same conversation twice — two writers corrupt one transcript.
+      if (v.resume) {
+        try {
+          const pl = await rpc("pane.list", {});
+          const open = (pl?.panes || []).find((p) => p?.agent_session?.value === v.resume);
+          if (open) throw new Error(`that conversation is already open in pane ${open.pane_id}`);
+        } catch (e) { if (/already open/.test(e.message)) throw e; }
+      }
+      const label = v.label || (v.resume ? (resumeField[0]?.options?.find((o) => o.v === v.resume)?.t.split("  ·  ")[0] || "") : "");
       const res = await rpc("tab.create", {
-        workspace_id: wsId, cwd: v.cwd, label: v.label || null, focus: false,
+        workspace_id: wsId, cwd: v.cwd, label: label || null, focus: false,
       });
       // Build the launch command. Locked → the fixed base plus the optional
       // skip-permissions flag, never free text. Unlocked → the editable field.
       let cmd = locked ? base : (v.cmd || "").trim();
       if (locked && v.skip) cmd += " --dangerously-skip-permissions";
       if (!cmd) return;
+      // The resume contract with the agent launcher: ONE env var prepended, nothing else changes.
+      if (v.resume && /^[A-Za-z0-9-]+$/.test(v.resume)) cmd = `HERDR_UI_RESUME=${v.resume} ${cmd}`;
       // herdr cannot spawn a command as the pane's foreground directly, so run
       // it in the fresh shell. An `exec` in the command replaces that shell,
       // which is what keeps the agent (not bash) as the foreground process.

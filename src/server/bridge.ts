@@ -118,6 +118,54 @@ location.replace("/?token="+encodeURIComponent(t));return false}</script></body>
   return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
 }
 
+/**
+ * Resume picker: let the "+" dialog open an EXISTING agent conversation as a pane. Off by default
+ * (HERDR_WEB_RESUME=1) because it only works when the agent's launcher honours the contract:
+ * the picker prepends `HERDR_UI_RESUME=<session_id>` to the locked launch command and nothing
+ * else. The list comes from the classic server's own session API on loopback, called with a
+ * server-held token that never reaches the browser; titles are the first human line of each
+ * transcript under $CLAUDE_CONFIG_DIR/projects.
+ */
+const RESUME_ENABLED = ["1", "true", "yes", "on"].includes((process.env.HERDR_WEB_RESUME || "").trim().toLowerCase());
+const SESSIONS_URL = (process.env.HERDR_WEB_SESSIONS_URL || "http://127.0.0.1:8787/v1/beast/sessions").trim();
+const SESSIONS_TOKEN = (process.env.HERDR_WEB_SESSIONS_TOKEN || process.env.BEAST_SERVER_TOKEN || "").trim();
+const TRANSCRIPT_ROOT = join((process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude")), "projects");
+const titleCache = new Map<string, { at: number; title: string | null }>();
+function sessionTitle(id: string): string | null {
+  const c = titleCache.get(id); if (c && Date.now() - c.at < 60_000) return c.title;
+  let title: string | null = null;
+  try {
+    const fs = require("fs") as typeof import("fs");
+    for (const dir of fs.readdirSync(TRANSCRIPT_ROOT)) {
+      const p = join(TRANSCRIPT_ROOT, dir, `${id}.jsonl`);
+      let fd: number; try { fd = fs.openSync(p, "r"); } catch { continue; }
+      const buf = Buffer.alloc(256 * 1024); const n = fs.readSync(fd, buf, 0, buf.length, 0); fs.closeSync(fd);
+      for (const line of buf.subarray(0, n).toString("utf8").split("\n")) {
+        try {
+          const o = JSON.parse(line); const m = o?.message ?? o;
+          if (m?.role !== "user") continue;
+          const cnt = m.content; const t = typeof cnt === "string" ? cnt : Array.isArray(cnt) ? cnt.filter((x: any) => x?.type === "text").map((x: any) => x.text).join(" ") : "";
+          const line1 = (t || "").replace(/\s+/g, " ").trim();
+          if (line1 && !line1.startsWith("[") && !line1.startsWith("<")) { title = line1.slice(0, 90); break; }
+        } catch { /* not json */ }
+      }
+      break;
+    }
+  } catch { /* no transcripts here */ }
+  titleCache.set(id, { at: Date.now(), title });
+  return title;
+}
+async function listSessions(): Promise<Array<{ id: string; title: string | null; messages: number; created_at: number; last_activity_at: number; busy: boolean }>> {
+  const r = await fetch(SESSIONS_URL, { headers: SESSIONS_TOKEN ? { authorization: `Bearer ${SESSIONS_TOKEN}` } : {} });
+  if (!r.ok) throw new Error(`session list ${r.status}`);
+  const d: any = await r.json();
+  const raw: any[] = Array.isArray(d) ? d : Array.isArray(d?.sessions) ? d.sessions : Object.values(d ?? {});
+  return raw.filter((x) => x && typeof x.session_id === "string").map((x) => ({
+    id: x.session_id, title: sessionTitle(x.session_id), messages: Number(x.message_count ?? 0),
+    created_at: Number(x.created_at ?? 0), last_activity_at: Number(x.last_activity_at ?? 0), busy: !!x.busy,
+  })).sort((a, b) => b.last_activity_at - a.last_activity_at).slice(0, 50);
+}
+
 /** Which view a pane opens in before the person has chosen: "chat" (default) or "terminal". */
 const DEFAULT_VIEW = (process.env.HERDR_WEB_DEFAULT_VIEW || "chat").trim() === "terminal" ? "terminal" : "chat";
 
@@ -909,6 +957,17 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
       if (!authed(req)) return Response.json({ error: "unauthorized" }, { status: 401 });
 
+      if (url.pathname === "/api/sessions") {
+
+        if (!RESUME_ENABLED) return Response.json({ error: "not found" }, { status: 404 });
+
+        try { return Response.json({ sessions: await listSessions() }); }
+
+        catch (e: any) { return Response.json({ error: String(e?.message || e) }, { status: 502 }); }
+
+      }
+
+
       if (url.pathname === "/api/health") {
         try {
           const pong = await call("ping");
@@ -987,6 +1046,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           altUiUrl: ALT_UI_URL || null,
           altUiLabel: ALT_UI_LABEL,
           defaultView: DEFAULT_VIEW,
+          resume: RESUME_ENABLED,
         });
       }
 
