@@ -95,6 +95,26 @@ async function passthrough(req: Request): Promise<Response | null> {
  *  this bridge has taken over a hostname whose old bookmarks people still hold. Unset = 401 as before. */
 const UNAUTH_REDIRECT = (process.env.HERDR_WEB_UNAUTH_REDIRECT || "").trim();
 
+/** Serve a small sign-in page at "/" to an unauthenticated visitor (paste your access link or token)
+ *  instead of a bare 401. Takes precedence over HERDR_WEB_UNAUTH_REDIRECT. The page only turns the
+ *  pasted token into the normal ?token= URL — there is no new credential path. */
+const LOGIN_PAGE = ["1", "true", "yes", "on"].includes((process.env.HERDR_WEB_LOGIN_PAGE || "").trim().toLowerCase());
+function loginPage(): Response {
+  const alt = ALT_UI_URL ? `<p class="alt"><a href="${ALT_UI_URL.replace(/"/g, "&quot;")}" rel="noopener">Use the ${ALT_UI_LABEL.replace(/</g, "&lt;")} instead</a></p>` : "";
+  const name = (AGENT_NAME || "herdr").replace(/</g, "&lt;");
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>${name} — sign in</title>
+<style>:root{color-scheme:dark light}body{font:15px/1.5 system-ui,sans-serif;margin:0;min-height:100vh;display:grid;place-items:center;background:#0f1115;color:#e6e6e6}
+form{background:#171a21;border:1px solid #2a2f3a;border-radius:12px;padding:28px 28px 20px;width:min(420px,92vw)}h1{font-size:20px;margin:0 0 6px}p{margin:6px 0 14px;color:#a9b0bd}
+input{width:100%;box-sizing:border-box;font:inherit;padding:10px 12px;border-radius:8px;border:1px solid #3a4150;background:#0f1115;color:inherit}button{margin-top:12px;width:100%;font:inherit;padding:10px;border-radius:8px;border:0;background:#4f7cff;color:#fff;cursor:pointer}
+.alt{margin:16px 0 0;text-align:center}.alt a{color:#a9b0bd}.err{color:#ff8a8a;min-height:1.4em;margin:8px 0 0}</style></head><body>
+<form onsubmit="return go(event)"><h1>${name}</h1><p>Paste your personal access link, or just the token from it.</p>
+<input id="t" autocomplete="off" autofocus placeholder="https://…/?token=… or the token" aria-label="access link or token"><button type="submit">Open</button><div class="err" id="e"></div>${alt}</form>
+<script>function go(ev){ev.preventDefault();var v=document.getElementById("t").value.trim(),t=v;try{if(/^https?:/i.test(v)){t=new URL(v).searchParams.get("token")||""}}catch(_){}
+if(!/^[A-Za-z0-9._~-]{8,}$/.test(t)){document.getElementById("e").textContent="That does not look like an access link or token.";return false}
+location.replace("/?token="+encodeURIComponent(t));return false}</script></body></html>`;
+  return new Response(html, { status: 200, headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store", "referrer-policy": "no-referrer" } });
+}
+
 /** Which view a pane opens in before the person has chosen: "chat" (default) or "terminal". */
 const DEFAULT_VIEW = (process.env.HERDR_WEB_DEFAULT_VIEW || "chat").trim() === "terminal" ? "terminal" : "chat";
 
@@ -468,9 +488,11 @@ const server = Bun.serve<WsData>({
 
     if (proxied) return proxied;
 
-    if (UNAUTH_REDIRECT && new URL(req.url).pathname === "/" && !authed(req)) {
+    if (new URL(req.url).pathname === "/" && !authed(req)) {
 
-      return Response.redirect(UNAUTH_REDIRECT, 302);
+      if (LOGIN_PAGE) return loginPage();
+
+      if (UNAUTH_REDIRECT) return Response.redirect(UNAUTH_REDIRECT, 302);
 
     }
     // Claim-on-first-use, enforced before routing so it covers websockets too.
