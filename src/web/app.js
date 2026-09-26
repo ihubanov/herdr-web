@@ -1132,15 +1132,17 @@ async function newSession(wsId) {
   const base = (me?.defaultLaunchCmd || "").trim();
   // Existing conversations (HERDR_WEB_RESUME): offered as a select on top of the dialog.
   let resumeField = [];
+  let resumeList = [];
   if (me?.resume) {
     try {
       const r = await fetch(auth("/api/sessions"));
       const list = r.ok ? (await r.json()).sessions || [] : [];
+      resumeList = list;
       if (list.length) {
         const when = (ms) => ms ? new Date(ms).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
         resumeField = [{ k: "resume", label: "conversation", type: "select", value: "", options: [
           { v: "", t: "start a new conversation" },
-          ...list.map((s) => ({ v: s.id, t: `${s.title || s.id.slice(0, 8)}  ·  ${s.messages} msgs  ·  ${when(s.last_activity_at)}${s.busy ? "  ·  BUSY" : ""}` })),
+          ...list.map((s) => ({ v: s.id, t: `${s.title || s.id.slice(0, 8)}  ·  ${s.messages} msgs  ·  ${when(s.last_activity_at)}${s.busy ? "  ·  BUSY" : ""}${s.open_in ? `  ·  OPEN in ${s.open_in}` : ""}` })),
         ] }];
       }
     } catch { /* the picker is optional; the dialog still works without it */ }
@@ -1173,12 +1175,13 @@ async function newSession(wsId) {
     onOK: async (v) => {
       if (!v.cwd) throw new Error("working directory is required");
       // Resuming: never open the same conversation twice — two writers corrupt one transcript.
+      // The server marks each listed conversation with the pane that holds it (from the pane's
+      // stream_session token — pane.list's agent_session is never set by claude-local, so the
+      // old client-side check compared against nothing). The agent's own transcript lock is the
+      // hard guard; this one just refuses before a pane is spent on a fresh session.
       if (v.resume) {
-        try {
-          const pl = await rpc("pane.list", {});
-          const open = (pl?.panes || []).find((p) => p?.agent_session?.value === v.resume);
-          if (open) throw new Error(`that conversation is already open in pane ${open.pane_id}`);
-        } catch (e) { if (/already open/.test(e.message)) throw e; }
+        const held = resumeList.find((s) => s.id === v.resume)?.open_in;
+        if (held) throw new Error(`that conversation is already open in pane ${held}`);
       }
       const label = v.label || (v.resume ? (resumeField[0]?.options?.find((o) => o.v === v.resume)?.t.split("  ·  ")[0] || "") : "");
       const res = await rpc("tab.create", {

@@ -174,6 +174,9 @@ async function listSessions(): Promise<Array<{ id: string; title: string | null;
  */
 const COOKIE_AUTH = !["0", "false", "off", "no"].includes((process.env.HERDR_WEB_COOKIE_AUTH || "1").trim().toLowerCase());
 const AUTH_COOKIE = "hw_auth";
+// SameSite=Lax: a top-level cross-origin GET still carries the cookie. That is safe only while every
+// state-changing endpoint is a POST — keep it that way (or move to Strict and accept that a link from
+// elsewhere lands signed-out).
 const AUTH_COOKIE_MAX_AGE = 30 * 24 * 3600;
 function cookieToken(req: Request): string | null {
   if (!COOKIE_AUTH) return null;
@@ -1116,7 +1119,23 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         if (!RESUME_ENABLED) return Response.json({ error: "not found" }, { status: 404 });
 
-        try { return Response.json({ sessions: await listSessions() }); }
+        try {
+          const sessions = await listSessions();
+          // Which of them a pane holds RIGHT NOW: two writers corrupt one transcript, so the picker
+          // marks these and the "+" dialog refuses them. pane.list carries no tokens, hence one
+          // pane.get per pane — a handful, and only when the dialog opens.
+          const openIn = new Map<string, string>();
+          try {
+            const pl: any = await call("pane.list");
+            for (const p of pl?.panes ?? []) {
+              try {
+                const sid = sessionIdFor((await call("pane.get", { pane_id: p.pane_id }))?.pane);
+                if (sid) openIn.set(sid, p.pane_id);
+              } catch { /* pane vanished mid-scan */ }
+            }
+          } catch { /* herdr unreachable: list without marks rather than no list */ }
+          return Response.json({ sessions: sessions.map((s) => ({ ...s, open_in: openIn.get(s.id) ?? null })) });
+        }
 
         catch (e: any) { return Response.json({ error: String(e?.message || e) }, { status: 502 }); }
 
