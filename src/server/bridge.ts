@@ -58,6 +58,9 @@ const DEFAULT_LAUNCH_CMD = (process.env.HERDR_WEB_DEFAULT_LAUNCH_CMD || "").trim
 const ALT_UI_URL = (process.env.HERDR_WEB_ALT_UI_URL || "").trim();
 const ALT_UI_LABEL = (process.env.HERDR_WEB_ALT_UI_LABEL || "Classic UI").trim();
 
+/** Which view a pane opens in before the person has chosen: "chat" (default) or "terminal". */
+const DEFAULT_VIEW = (process.env.HERDR_WEB_DEFAULT_VIEW || "chat").trim() === "terminal" ? "terminal" : "chat";
+
 const LOCK_LAUNCH = ["1", "true", "yes", "on"].includes(
   (process.env.HERDR_WEB_LOCK_LAUNCH || "").trim().toLowerCase(),
 );
@@ -842,6 +845,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           agentName: AGENT_NAME,
           altUiUrl: ALT_UI_URL || null,
           altUiLabel: ALT_UI_LABEL,
+          defaultView: DEFAULT_VIEW,
         });
       }
 

@@ -85,7 +85,7 @@ let capability = null;            // structured-stream capability of the open pa
 // Chat is the default view for agents that expose a stream. Flipping to the
 // terminal sticks, so someone who prefers the raw pane isn't fighting the app
 // on every open. Panes with no stream ignore this entirely.
-let preferChat = LS.get("preferChat", true);
+let preferChat = LS.get("preferChat", null) ?? true;
 // Capability is a per-pane round trip. Caching it means only the FIRST open of
 // a pane can flash the terminal before landing on chat; every later open goes
 // straight there.
@@ -1396,6 +1396,18 @@ async function loadMe() {
       const brand = document.querySelector(".brand");
       if (brand) brand.textContent = me.agentName;
     }
+    // One-click switch to another front end for the same agent, when the server offers one.
+    const alt = document.getElementById("altui");
+    if (alt) {
+      if (me.altUiUrl) {
+        alt.href = me.altUiUrl; alt.textContent = me.altUiLabel || "Classic UI";
+        alt.title = `Switch to ${me.altUiLabel || "the classic UI"} (a separate interface with its own conversations)`;
+        alt.hidden = false;
+      } else alt.hidden = true;
+    }
+    // Default pane view comes from the server (HERDR_WEB_DEFAULT_VIEW) until this person has
+    // clicked the toggle themselves; an explicit choice is stored and wins thereafter.
+    if (LS.get("preferChat", null) === null) preferChat = me.defaultView !== "terminal";
     el.me.textContent = me.multiuser ? me.label : "";
     updateTitle();
     el.me.title = me.multiuser
