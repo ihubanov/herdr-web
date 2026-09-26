@@ -396,6 +396,29 @@ async function iframeForPane(
   }
 }
 
+/**
+ * Which conversation a pane is writing, preferring the agent's own statement.
+ *
+ *   stream_session   a token the agent SETS, naming the file it is appending to
+ *   agent_session    herdr's detection, which INFERS a session from the process
+ *
+ * They normally agree. They can disagree when an agent resumes an existing
+ * conversation: the process is new, the file is old, and whether detection
+ * re-reads or latches the id it first saw is herdr-core behaviour that neither
+ * side of this integration controls. The agent that owns the file is the better
+ * authority, so ask it first and fall back to detection.
+ *
+ * The distinction only reaches the transcript path when a pane advertises a
+ * session but has no live stream socket — an agent between turns, or one that
+ * has exited leaving its conversation on disk. That is exactly the case the
+ * resume work creates.
+ */
+function sessionIdFor(pane: any): string {
+  const stated = String(pane?.tokens?.stream_session ?? "").trim();
+  if (stated) return stated;
+  return String(pane?.agent_session?.value ?? "").trim();
+}
+
 /** The pane token TTL. Short on purpose: a crashed session's view expires. */
 const ADVERTISE_TTL_MS = 300_000;
 const ADVERTISE_REFRESH_MS = 120_000;
@@ -718,7 +741,7 @@ const server = Bun.serve<WsData>({
             let path: string | null = null, sid = "", paneAgent = "";
             try {
               const pane = (await call("pane.get", { pane_id: d.paneId! }))?.pane;
-              sid = pane?.agent_session?.value ?? "";
+              sid = sessionIdFor(pane);
               paneAgent = String(pane?.agent ?? "");
               if (sid) path = await findTranscript(sid);
             } catch { /* pane vanished */ }
@@ -1167,8 +1190,8 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         let transcript: { path: string; session: string } | null = null;
         if (!cap) {
           try {
-            const sid = (await call("pane.get", { pane_id: paneId }))?.pane?.agent_session?.value;
-            if (typeof sid === "string" && sid) {
+            const sid = sessionIdFor((await call("pane.get", { pane_id: paneId }))?.pane);
+            if (sid) {
               const path = await findTranscript(sid);
               if (path) transcript = { path, session: sid };
             }
@@ -1204,8 +1227,8 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         }
         if (before === 0) return Response.json({ frames: [], startOffset: 0, done: true });
         try {
-          const sid = (await call("pane.get", { pane_id: paneId }))?.pane?.agent_session?.value;
-          const path = typeof sid === "string" && sid ? await findTranscript(sid) : null;
+          const sid = sessionIdFor((await call("pane.get", { pane_id: paneId }))?.pane);
+          const path = sid ? await findTranscript(sid) : null;
           if (!path) return Response.json({ frames: [], startOffset: 0, done: true });
           return Response.json(await readBefore(path, before));
         } catch {
