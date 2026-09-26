@@ -263,6 +263,12 @@ preference. `loopback` accepts only 127.0.0.1/localhost, and every policy refuse
 herdr-web's own origin — framing ourselves would let the frame drop its sandbox
 and read the token.
 
+The three values are `off`, `loopback` and `on`. **Anything else silently means
+`off`** — `any`, `true` or a stray quote disables the feature with no error
+anywhere, which is easy to hit if you inferred the value from the source. The
+startup banner prints the effective policy; that is the quickest check that the
+env file is being read at all.
+
 ### Shared browser
 
 `tools/shared-browser.sh` is the case this exists for: it brings up Xvfb +

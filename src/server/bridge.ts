@@ -64,7 +64,10 @@ const ALT_UI_LABEL = (process.env.HERDR_WEB_ALT_UI_LABEL || "Classic UI").trim()
  * front ends. These requests bypass this bridge's token check entirely (the upstream has its
  * own authentication) and are streamed as-is, so SSE works. Format:
  *   HERDR_WEB_PASSTHROUGH="/v1/=http://127.0.0.1:8787,/sage-ui/=http://127.0.0.1:8787"
- * Only http(s) upstreams; WebSocket upgrades are not proxied (the classic UI uses SSE).
+ * Only http(s) upstreams, and THIS proxy does not upgrade WebSockets (the classic UI uses
+ * SSE). That limit is local to passthrough: the shared-display proxy at /shared/<pane>/ has
+ * its own upgrade path and does carry noVNC's socket — a reader asking "can noVNC work
+ * through this at all" hits this comment first, and the answer there is yes.
  */
 const PASSTHROUGH: Array<[string, string]> = (process.env.HERDR_WEB_PASSTHROUGH || "")
   .split(",").map((s) => s.trim()).filter(Boolean)
@@ -187,7 +190,21 @@ const IFRAME_POLICY: IframePolicy = (() => {
  * from ours — otherwise the frame can reach into this page and read the token.
  * Rejecting our own origin is what makes that sandbox choice defensible.
  */
-export function iframeUrlAllowed(raw: string, policy: IframePolicy, selfPort: number):
+export /**
+ * `Secure` when the viewer actually arrived over TLS.
+ *
+ * Not unconditional: herdr-web binds loopback and is commonly reached over
+ * plain http, where a Secure cookie is simply dropped and the session silently
+ * fails to stick. Behind a TLS reverse proxy the connection to us is still
+ * http, so the proxy's x-forwarded-proto is the only thing that knows.
+ */
+function secureAttr(req: Request): string {
+  const proto = req.headers.get("x-forwarded-proto")?.split(",")[0]?.trim();
+  const https = proto ? proto === "https" : new URL(req.url).protocol === "https:";
+  return https ? " Secure;" : "";
+}
+
+function iframeUrlAllowed(raw: string, policy: IframePolicy, selfPort: number):
     { ok: true; url: string } | { ok: false; reason: string } {
   if (policy === "off") return { ok: false, reason: "iframes disabled (HERDR_WEB_IFRAMES=off)" };
   let u: URL;
@@ -789,7 +806,7 @@ function pinGate(req: Request): { deny: boolean; setCookie?: string } {
   console.log(`[expose] link claimed — further openers will be refused`);
   return {
     deny: false,
-    setCookie: `${PIN_COOKIE}=${secret}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`,
+    setCookie: `${PIN_COOKIE}=${secret}; Path=/; HttpOnly;${secureAttr(req)} SameSite=Lax; Max-Age=86400`,
   };
 }
 
@@ -870,7 +887,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       if (isEntry && viaQuery && qTok) {
         headers.append("set-cookie",
           `${cookieName}=${encodeURIComponent(qTok)}; Path=/shared/${encodeURIComponent(paneId)}; ` +
-          `HttpOnly; SameSite=Lax; Max-Age=28800`);
+          `HttpOnly;${secureAttr(req)} SameSite=Lax; Max-Age=28800`);
       }
       return new Response(res.body, { status: res.status, headers });
     }
