@@ -1017,7 +1017,10 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       });
       const qTok = url.searchParams.get("token");
       const viaQuery = qTok !== null && identity.resolve(qTok) !== null;
-      if (!hasCookie && !viaQuery) return new Response("unauthorized", { status: 401 });
+      // A cookie-signed-in viewer has no token to put in the iframe URL; the
+      // session cookie is Path=/ so every subrequest carries it too.
+      const viaSession = identity.resolve(cookieToken(req)) !== null;
+      if (!hasCookie && !viaQuery && !viaSession) return new Response("unauthorized", { status: 401 });
 
       const target = await sharedTarget(paneId);
       if (!target) return new Response("this pane is not sharing a display", { status: 404 });
