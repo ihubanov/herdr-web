@@ -1297,8 +1297,24 @@ el.newspace.onclick = newSpace;
  * history: this says "the terminal is waiting, here is what it shows", which is
  * true, rather than fabricating a request nobody can answer.
  */
+/**
+ * The question we have already answered, as pane + its exact text.
+ *
+ * Status does not return to blocked the instant an answer lands — measured at
+ * about ten seconds through working before idle — and the fleet only refreshes
+ * on its own tick, so the panel would sit there after being answered. That is
+ * not merely stale: there is no request id here, so a second click is a second
+ * message typed into the REPL, and a question still on screen invites one.
+ *
+ * Keyed by the text, so the SAME question stays hidden while a NEW one (a
+ * different prompt, with different text) appears immediately.
+ */
+let askAnswered = "";
+
 function renderChatAsk(f) {
-  const show = !!(f && f.agent_status === "blocked" && f.preview?.length);
+  const blocked = !!(f && f.agent_status === "blocked" && f.preview?.length);
+  const key = blocked ? `${f.pane_id}\u0000${f.preview.join("\n")}` : "";
+  const show = blocked && key !== askAnswered;
   el.chatask.classList.toggle("on", show);
   if (!show) { el.chatpresets.innerHTML = ""; return; }
   el.chataskq.textContent = f.preview.join("\n");
@@ -1306,8 +1322,15 @@ function renderChatAsk(f) {
     .map((p) => `<button class="preset" data-text="${esc(p.text)}">${esc(p.label)}</button>`)
     .join("");
   el.chatpresets.querySelectorAll(".preset").forEach((b) => {
-    b.onclick = () => send(f.pane_id, b.dataset.text, b);
+    b.onclick = () => { answerChatAsk(key); send(f.pane_id, b.dataset.text, b); };
   });
+}
+
+/** Mark the visible question answered and take it off screen at once. */
+function answerChatAsk(key) {
+  askAnswered = key || askAnswered;
+  el.chatask.classList.remove("on");
+  el.chatpresets.innerHTML = "";
 }
 
 function renderChat() {
@@ -2462,6 +2485,12 @@ function sendChatMsg() {
   // An attachment alone is a valid message — the paths are the content.
   const text = withAttachments(el.cin.value);
   if (!text.trim() || streamSock?.readyState !== 1) return;
+  // Typing the answer counts as answering it: a "1" sent into a blocked pane is
+  // the reply, and leaving the question up would invite sending it twice.
+  if (el.chatask.classList.contains("on")) {
+    const f = selected ? entry(selected) : null;
+    if (f?.preview?.length) answerChatAsk(`${f.pane_id}\u0000${f.preview.join("\n")}`);
+  }
   streamSock.send(JSON.stringify({ type: "say", text }));
   el.cin.value = "";
   clearAttachments();

@@ -56,8 +56,21 @@ let inFlight = false;
 const REPO_TTL_MS = 30_000;
 const PREVIEW_LINES = 14;
 
-/** preview cache keyed by pane; invalidated when the pane's revision moves */
-const previewCache = new Map<string, { rev: unknown; lines: string[] }>();
+/**
+ * Preview cache. Keyed by pane revision AND age.
+ *
+ * Revision alone is not enough: a pane's screen can change without it moving,
+ * so a blocked pane kept showing the question it had when it FIRST blocked.
+ * Measured: two different prompts written to one pane produced the same preview
+ * across three refreshes. A stale question is worse than no question — it is
+ * the wrong one, presented as current, next to the buttons that answer it.
+ *
+ * The age bound keeps that honest while preserving what the cache was for: only
+ * blocked panes are ever read, and a burst of refreshes inside the window still
+ * costs one read.
+ */
+const PREVIEW_TTL_MS = 2000;
+const previewCache = new Map<string, { rev: unknown; lines: string[]; at: number }>();
 
 /**
  * Last meaningful lines of a pane's visible screen, so a blocked card can show
@@ -66,7 +79,7 @@ const previewCache = new Map<string, { rev: unknown; lines: string[] }>();
  */
 async function previewFor(paneId: string, revision: unknown): Promise<string[] | undefined> {
   const hit = previewCache.get(paneId);
-  if (hit && hit.rev === revision) return hit.lines;
+  if (hit && hit.rev === revision && Date.now() - hit.at < PREVIEW_TTL_MS) return hit.lines;
   try {
     const res = await call("pane.read", {
       pane_id: paneId, source: "visible", format: "text", lines: 60, strip_ansi: true,
@@ -77,7 +90,7 @@ async function previewFor(paneId: string, revision: unknown): Promise<string[] |
       .map((l) => l.replace(/\s+$/, ""))
       .filter((l) => l.trim().length > 0)
       .slice(-PREVIEW_LINES);
-    previewCache.set(paneId, { rev: revision, lines });
+    previewCache.set(paneId, { rev: revision, lines, at: Date.now() });
     return lines;
   } catch {
     return undefined;
