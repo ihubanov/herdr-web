@@ -129,10 +129,19 @@ export async function readBefore(
   // mostly attachment records, so a whole chunk can be skippable; returning an
   // empty page would make the client fetch again and again to make progress.
   let cursor = endOffset;
+  let window = maxBytes;
   for (let i = 0; i < maxChunks; i++) {
-    const page = await readOneBefore(path, cursor, maxBytes);
+    const page = await readOneBefore(path, cursor, window);
     if (page.frames.length || page.done) return page;
-    if (page.startOffset >= cursor) return { ...page, done: true };  // no progress
+    if (page.startOffset >= cursor) {
+      // No complete record fit in the window: one line is longer than it (a huge tool
+      // result or attachment). Reporting `done` here hid the first 10 MB of a 13 MB
+      // conversation behind a single such line. Widen and read again — only byte 0 is
+      // the end of history. The cap is for a pathological file, not a real transcript.
+      if (window >= 64 * 1024 * 1024) return { ...page, done: true };
+      window *= 4;
+      continue;
+    }
     cursor = page.startOffset;
   }
   return { frames: [], startOffset: cursor, done: cursor <= 0 };
