@@ -422,12 +422,16 @@ async function iframeForPane(
  */
 function sessionIdFor(pane: any): string {
   const t = pane?.tokens ?? {};
-  // `stream_session` when the pane speaks the stream protocol, `session` when it
-  // does not. The second exists so an agent that runs a plain TUI can still SAY
-  // which conversation it is writing — a launcher knows the id before it execs,
-  // where herdr can only infer one from the screen afterwards. Same precedence
-  // either way: a statement beats an inference.
-  const stated = String(t.stream_session ?? t.session ?? "").trim();
+  // `stream_session` when the pane speaks the stream protocol, `pane_session`
+  // when it does not. The second exists so an agent running a plain TUI can
+  // still SAY which conversation it is writing — a launcher knows the id before
+  // it execs, where herdr can only infer one from the screen afterwards. Same
+  // precedence either way: a statement beats an inference.
+  //
+  // `pane_session`, not `session`: herdr's own vocabulary already uses "session"
+  // for something else (session.snapshot), and a token that reads ambiguously in
+  // the host's terms will be misread eventually.
+  const stated = String(t.stream_session ?? t.pane_session ?? "").trim();
   if (stated) return stated;
   return String(pane?.agent_session?.value ?? "").trim();
 }

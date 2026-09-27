@@ -388,15 +388,23 @@ an inference about it:
 
 ```bash
 herdr pane report-metadata "$HERDR_PANE_ID" --source launcher \
-  --token "session=<session-id>" --ttl-ms 300000     # refresh it; the TTL is real
+  --token "pane_session=<session-id>" --ttl-ms 300000   # refresh it; the TTL is real
 ```
 
 `stream_session` does the same job for a pane that speaks the stream protocol.
+(It is `pane_session` rather than `session` because herdr's own vocabulary uses
+"session" for something else.)
 Either is enough; a launcher that knows the id before it execs should say so
 rather than leaving herdr to work it out from the screen afterwards. Without
 one, `agent_session` is used, which is correct whenever herdr's detection is.
 
 ### A blank terminal is not a bug — do not "fix" it
+
+**This is about stream-transport panes only.** The same agent can be run as an
+interactive TUI instead, and then its terminal is a real REPL and everything
+below stops applying — the two shapes coexist, so check which one you are
+looking at before concluding anything. What follows is about a pane running the
+stream transport.
 
 An agent driven over the stream protocol need not draw a TUI, and the
 `--print --output-format stream-json` transport draws **none**. Its terminal
