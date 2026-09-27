@@ -18,6 +18,18 @@
  *     Ink prompt with bracketed paste swallows it at ANY length. Every message
  *     goes text, settle, then a SEPARATE send_keys(["enter"]).
  *
+ *     The byte is not the problem: herdr sends 0x0D for "enter" (its encoders
+ *     have no LF path), which is what submits. The BUNDLING is — text and key
+ *     arrive as one write, and once that chunk is flagged as a paste the
+ *     trailing CR reads as content rather than as a submit.
+ *
+ *     THIS IS NOT A BUG AWAITING A FIX UPSTREAM, and the trade is worth knowing
+ *     before anyone proposes "make a trailing CR in a paste submit". A paste
+ *     that auto-submits means someone pasting a command with a trailing newline
+ *     starts the turn before they can read it back. The ambiguity is resolved
+ *     in favour of NOT submitting, deliberately, by the agent. Sending the CR
+ *     separately is what every terminal client does anyway.
+ *
  * Because this queue serializes, concurrency is handled structurally: only one
  * message per pane is ever in flight, so the non-atomic two-call path is safe.
  */
