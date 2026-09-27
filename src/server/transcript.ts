@@ -74,22 +74,45 @@ export async function findTranscript(sessionId: string): Promise<string | null> 
  * Read the tail of a file without loading it. Transcripts reach tens of MB, and a
  * pane opening must not pull that through memory to show the last few turns.
  */
+/** Ceiling for a widening read. For a pathological file, not a real transcript. */
+const MAX_WINDOW = 64 * 1024 * 1024;
+
 async function readTail(
   path: string, maxBytes: number,
 ): Promise<{ text: string; size: number; startOffset: number }> {
   const st = await stat(path);
   const size = st.size;
-  if (size <= maxBytes) return { text: await readFile(path, "utf8"), size, startOffset: 0 };
-  const fh = await open(path, "r");
-  try {
-    const buf = Buffer.alloc(maxBytes);
-    await fh.read(buf, 0, maxBytes, size - maxBytes);
+  // Widen until the window holds at least one complete record, the same way
+  // readBefore pages. A single record CAN be larger than the window — a big tool
+  // result is an ordinary thing in these transcripts, not a malformed file — and
+  // when the last one is, this window contains no newline at all. The old code
+  // took indexOf("\n") === -1, sliced from 0, and handed back a fragment that
+  // parses to nothing: a live conversation that opened completely empty.
+  for (let window = maxBytes; ; window *= 4) {
+    if (size <= window) return { text: await readFile(path, "utf8"), size, startOffset: 0 };
+    const fh = await open(path, "r");
+    let text: string;
+    try {
+      const buf = Buffer.alloc(window);
+      await fh.read(buf, 0, window, size - window);
+      text = buf.toString("utf8");
+    } finally { await fh.close(); }
     // Drop the leading partial line — it is a fragment of a record we cut through.
-    const text = buf.toString("utf8");
+    // Finding A newline is not enough: when the window lands inside one huge
+    // record, the only newline in it is the one TERMINATING that record, so the
+    // body after it is empty. Both cases mean the same thing — no complete
+    // record in this window — and both must widen.
     const nl = text.indexOf("\n");
-    const body = text.slice(nl + 1);
-    return { text: body, size, startOffset: size - Buffer.byteLength(body, "utf8") };
-  } finally { await fh.close(); }
+    const body = nl === -1 ? "" : text.slice(nl + 1);
+    if (body.trim()) {
+      return { text: body, size, startOffset: size - Buffer.byteLength(body, "utf8") };
+    }
+    if (window >= MAX_WINDOW) {
+      // Nothing complete even at the ceiling. Show nothing rather than a
+      // fragment, and leave a startOffset so paging back can still reach it.
+      return { text: "", size, startOffset: Math.max(0, size - window) };
+    }
+  }
 }
 
 /** One JSONL record -> the SDKMessage the client renders, or null to drop it. */
@@ -138,7 +161,7 @@ export async function readBefore(
       // result or attachment). Reporting `done` here hid the first 10 MB of a 13 MB
       // conversation behind a single such line. Widen and read again — only byte 0 is
       // the end of history. The cap is for a pathological file, not a real transcript.
-      if (window >= 64 * 1024 * 1024) return { ...page, done: true };
+      if (window >= MAX_WINDOW) return { ...page, done: true };
       window *= 4;
       continue;
     }
