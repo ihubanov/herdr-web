@@ -380,6 +380,22 @@ The capability is probed with a single `pane.get` when you open a pane
 refresh would cost N extra round trips). Panes without it simply do not show the
 button.
 
+### Telling herdr-web which conversation a pane is writing
+
+A pane names its conversation with a metadata token, and herdr-web prefers that
+over herdr's own `agent_session` detection — a statement from the process beats
+an inference about it:
+
+```bash
+herdr pane report-metadata "$HERDR_PANE_ID" --source launcher \
+  --token "session=<session-id>" --ttl-ms 300000     # refresh it; the TTL is real
+```
+
+`stream_session` does the same job for a pane that speaks the stream protocol.
+Either is enough; a launcher that knows the id before it execs should say so
+rather than leaving herdr to work it out from the screen afterwards. Without
+one, `agent_session` is used, which is correct whenever herdr's detection is.
+
 ### A blank terminal is not a bug — do not "fix" it
 
 An agent driven over the stream protocol need not draw a TUI, and the

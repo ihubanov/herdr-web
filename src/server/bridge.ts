@@ -421,7 +421,13 @@ async function iframeForPane(
  * resume work creates.
  */
 function sessionIdFor(pane: any): string {
-  const stated = String(pane?.tokens?.stream_session ?? "").trim();
+  const t = pane?.tokens ?? {};
+  // `stream_session` when the pane speaks the stream protocol, `session` when it
+  // does not. The second exists so an agent that runs a plain TUI can still SAY
+  // which conversation it is writing — a launcher knows the id before it execs,
+  // where herdr can only infer one from the screen afterwards. Same precedence
+  // either way: a statement beats an inference.
+  const stated = String(t.stream_session ?? t.session ?? "").trim();
   if (stated) return stated;
   return String(pane?.agent_session?.value ?? "").trim();
 }
