@@ -380,6 +380,31 @@ The capability is probed with a single `pane.get` when you open a pane
 refresh would cost N extra round trips). Panes without it simply do not show the
 button.
 
+### A blank terminal is not a bug — do not "fix" it
+
+An agent driven over the stream protocol need not draw a TUI, and the
+`--print --output-format stream-json` transport draws **none**. Its terminal
+shows a launch banner and then nothing, for the life of the pane. That looks
+broken and is not: the conversation lives in the chat view, and herdr-web says
+so — the chat button is marked and the status line points at it.
+
+**Having no screen to read is the property everything else depends on.** It is
+why such an agent reports its own state instead of being observed:
+
+| what | why it is self-reported |
+| --- | --- |
+| `agent_status` | herdr reads a TUI to tell working from idle; with none it stays `unknown` forever |
+| `agent` name | herdr's screen detector matches the Claude Code TUI, so an interactive claude-local is indistinguishable from `claude` |
+| `stream_session` | which conversation the pane is appending to — a statement, where `agent_session` is an inference about a process |
+| `historyFrom` | the transcript offset at resume, which only the resuming process knows |
+
+Drawing *something* into that terminal to make it look alive would break the
+premise: the moment there is a screen to scrape, screen detection starts
+competing with the agent's own reports, and the one that is merely *plausible*
+can win. The blank terminal is the cost of message-level rendering that does not
+depend on parsing pixels. Leave it blank; the fix for "it looks empty" is to say
+where the conversation is, which is what the hint does.
+
 Typing also claims control implicitly. A terminal has exactly one writer (herdr
 enforces it), so requiring a click first was ceremony; the first keystroke takes
 control and the status line says so.

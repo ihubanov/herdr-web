@@ -871,6 +871,11 @@ function applyChatBtn(c) {
   // then nothing, for the life of the pane. Landing there looks like an empty
   // session rather than a conversation that lives one click away. Say so, and
   // draw the eye to the button, rather than overriding a stored preference.
+  //
+  // Do NOT "fix" the blank terminal by getting the agent to draw into it. See
+  // README "A blank terminal is not a bug": having no screen to read is the
+  // property that makes the agent's own reports authoritative, and a screen to
+  // scrape puts herdr's detector back in competition with them.
   const stranded = !toTerm && view === "terminal";
   el.chatbtn.classList.toggle("nudge", stranded);
   if (stranded) el.tstatus.textContent = "the conversation for this pane is in chat view";
