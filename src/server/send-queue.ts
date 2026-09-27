@@ -13,18 +13,21 @@
  *     The literal text never renders, so verifying delivery by searching pane
  *     output for the message always reports failure.
  *
- *  3. `send_input {text, keys:["enter"]}` does NOT submit a large paste — the
- *     Enter is absorbed into the pasted block. Long messages need text, a
- *     settle delay, then a SEPARATE send_keys(["enter"]).
+ *  3. `send_input {text, keys:["enter"]}` does NOT reliably submit at all. The
+ *     Enter is absorbed into a pasted block above the paste threshold, and an
+ *     Ink prompt with bracketed paste swallows it at ANY length. Every message
+ *     goes text, settle, then a SEPARATE send_keys(["enter"]).
  *
  * Because this queue serializes, concurrency is handled structurally: only one
  * message per pane is ever in flight, so the non-atomic two-call path is safe.
  */
 import { call } from "./herdr-socket.ts";
 
-/** Above this, use the two-call path; below, one atomic send_input. */
+/** Above this the agent collapses input into a paste placeholder, which needs
+ *  longer to settle before Enter will submit it. */
 const PASTE_THRESHOLD = 160;
 const SETTLE_MS = 900;
+const SHORT_SETTLE_MS = 250;
 const POLL_MS = 1500;
 const MAX_WAIT_MS = 10 * 60_000;
 
@@ -144,15 +147,23 @@ async function receptive(paneId: string): Promise<boolean> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function deliver(m: QueuedMessage): Promise<void> {
-  if (m.text.length <= PASTE_THRESHOLD) {
-    // Short: one atomic call. Safe under contention with non-queue writers.
-    await call("pane.send_input", { pane_id: m.paneId, text: m.text, keys: ["enter"] });
-    return;
-  }
-  // Long: the agent will collapse this into a paste placeholder, and an Enter
-  // bundled into the same call would be swallowed by it.
+  // Text, settle, THEN Enter — at every length.
+  //
+  // There used to be an atomic send_input for short messages, on the reasoning
+  // that one call cannot be interleaved by another writer. It does not submit in
+  // every TUI: claude-local's Ink prompt with bracketed paste swallows a bundled
+  // Enter at ANY length, not only above the paste threshold, and the message
+  // then sits visible at the prompt forever while the pane reports idle. Nothing
+  // reports an error, which is the worst shape of failure — it looks delivered.
+  //
+  // Separating them is what the long path already did, and it works on every
+  // agent tried here. The cost is a settle window in which another writer could
+  // interleave; a person typing into the same pane at the same moment was
+  // already a mess, so this trades a theoretical race for a real bug.
   await call("pane.send_text", { pane_id: m.paneId, text: m.text });
-  await sleep(SETTLE_MS);
+  // A short line needs only the terminal's own round trip; a long one is
+  // collapsed into a paste placeholder first, which takes longer to settle.
+  await sleep(m.text.length <= PASTE_THRESHOLD ? SHORT_SETTLE_MS : SETTLE_MS);
   await call("pane.send_keys", { pane_id: m.paneId, keys: ["enter"] });
 }
 
