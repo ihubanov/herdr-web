@@ -862,6 +862,15 @@ function applyChatBtn(c) {
     : (fromFile
         ? "Chat rendered from the session transcript on disk"
         : "Message-level chat with per-message attribution");
+
+  // An agent driven over the stream protocol need not draw a TUI at all — the
+  // stream-json transport draws none, so its terminal shows a launch banner and
+  // then nothing, for the life of the pane. Landing there looks like an empty
+  // session rather than a conversation that lives one click away. Say so, and
+  // draw the eye to the button, rather than overriding a stored preference.
+  const stranded = !toTerm && view === "terminal";
+  el.chatbtn.classList.toggle("nudge", stranded);
+  if (stranded) el.tstatus.textContent = "the conversation for this pane is in chat view";
 }
 
 el.chatbtn.onclick = () => {
@@ -2131,16 +2140,96 @@ const TOOL_ARG = {
   WebFetch: (i) => i.url,
   Task: (i) => i.description,
 };
+/**
+ * A tool result's content, as text a person can read.
+ *
+ * `content` is usually an array of {type:"text", text} blocks, and stringifying
+ * that array is what produced the unreadable output: the real text ends up
+ * inside a JSON string, so every newline becomes a literal \n and every quote a
+ * \". Pull the text out instead.
+ */
+function toolResultText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((b) => {
+      if (typeof b === "string") return b;
+      if (b && typeof b === "object") {
+        if (typeof b.text === "string") return b.text;
+        if (b.type === "image") return "[image]";
+        return humanJson(b);
+      }
+      return String(b);
+    }).join("\n");
+  }
+  if (content === null || content === undefined) return "";
+  return humanJson(content);
+}
+
+/**
+ * JSON as indented key/value lines, with strings printed LITERALLY.
+ *
+ * JSON.stringify(v, null, 2) indents the structure but re-escapes every string,
+ * so a value containing newlines stays a single wall of \n — which is most of
+ * what a tool returns. Printing the value as a block is the whole difference
+ * between scannable and not.
+ */
+function humanJson(v, depth = 0) {
+  const pad = "  ".repeat(depth);
+  if (v === null || v === undefined) return "null";
+  if (Array.isArray(v)) {
+    if (!v.length) return "[]";
+    return v.map((x) => {
+      const r = humanJson(x, depth + 1);
+      return `${pad}- ${r.startsWith(" ") ? r.trimStart() : r}`;
+    }).join("\n");
+  }
+  if (typeof v === "object") {
+    const keys = Object.keys(v);
+    if (!keys.length) return "{}";
+    return keys.map((k) => {
+      const val = v[k];
+      if (typeof val === "string" && val.includes("\n")) {
+        return `${pad}${k}:\n` + val.split("\n").map((l) => `${pad}  ${l}`).join("\n");
+      }
+      if (val && typeof val === "object") {
+        const inner = humanJson(val, depth + 1);
+        return inner === "{}" || inner === "[]" ? `${pad}${k}: ${inner}` : `${pad}${k}:\n${inner}`;
+      }
+      return `${pad}${k}: ${val === null ? "null" : String(val)}`;
+    }).join("\n");
+  }
+  return String(v);
+}
+
+/** Text that is really JSON, re-rendered readably. Left alone otherwise. */
+function unwrapJson(text) {
+  const t = String(text ?? "").trim();
+  if (!t || (t[0] !== "{" && t[0] !== "[")) return text;
+  try { return humanJson(JSON.parse(t)); } catch { return text; }
+}
+
 function toolLine(name, input) {
   const inp = (input && typeof input === "object") ? input : {};
   const pick = TOOL_ARG[name];
   let arg = pick ? pick(inp) : undefined;
   if (arg === undefined) {
     // Unknown tool: show its fields compactly rather than a JSON blob.
-    const parts = Object.entries(inp)
-      .filter(([k]) => k !== "description")
-      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`);
-    arg = parts.join("  ");
+    const entries = Object.entries(inp).filter(([k]) => k !== "description");
+    const flat = entries
+      .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+      .join("  ");
+    // One line while it fits. Past that it stops being a line and becomes a
+    // paragraph you have to read to find the second argument in, so give each
+    // field its own row and let long values wrap under their key.
+    if (flat.length <= 110) arg = flat;
+    else {
+      const rows = entries.map(([k, v]) => {
+        const val = typeof v === "string" ? v : humanJson(v);
+        return `<div class="targ"><span class="k">${esc(k)}</span>` +
+               `<span class="v">${esc(val)}</span></div>`;
+      }).join("");
+      return `<span class="name">${esc(name)}</span><div class="targs">${rows}</div>`;
+    }
   }
   return `<span class="name">${esc(name)}</span>${arg ? " " + esc(String(arg)) : ""}`;
 }
@@ -2239,7 +2328,7 @@ function handleFrame(f) {
         `<div class="line"><span class="glyph dot">●</span>` +
         `<div class="tool">${toolLine(c.name, c.input)}</div></div>`, c.name || "tool", !isReplay);
     } else if (c.type === "tool_result") {
-      const body = typeof c.content === "string" ? c.content : JSON.stringify(c.content ?? "");
+      const body = unwrapJson(toolResultText(c.content));
       const err = /^(exit code [1-9]|fatal:|error|traceback)/i.test(body.trim());
       const t = esc(body.trim());
       appendTool(f.author,

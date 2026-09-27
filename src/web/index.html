@@ -261,6 +261,21 @@
   /* A tool call reads as the command it is, not as the JSON that carried it. */
   .tool{color:#9fb4cc;white-space:pre-wrap;word-break:break-word}
   .tool .name{color:var(--blocked);font-weight:700}
+  /* A tool call with several long arguments is not a line. Each field gets a
+     row, the key stays in a fixed column so the eye can run down it, and the
+     value wraps under itself instead of pushing the next key off the screen. */
+  /* The one button that leads somewhere when the terminal has nothing to show. */
+  #ctl button.nudge{border-color:var(--blocked);color:var(--blocked)}
+
+  .tool .targs{display:grid;gap:2px;margin:3px 0 0 0}
+  .tool .targ{display:grid;grid-template-columns:minmax(0,120px) 1fr;gap:8px;align-items:baseline}
+  .tool .targ .k{color:#7c8ba1;text-align:right;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis}
+  .tool .targ .v{color:#9fb4cc;white-space:pre-wrap;word-break:break-word;min-width:0}
+  @media (max-width: 760px) {
+    .tool .targ{grid-template-columns:1fr;gap:0}
+    .tool .targ .k{text-align:left}
+  }
   .tool .arg{color:#c9d3de}
   .out{color:var(--dim);white-space:pre-wrap;word-break:break-word}
   .out.err{color:#e0a0a0}
