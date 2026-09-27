@@ -162,7 +162,7 @@ async function listSessions(): Promise<Array<{ id: string; title: string | null;
   const d: any = await r.json();
   const raw: any[] = Array.isArray(d) ? d : Array.isArray(d?.sessions) ? d.sessions : Object.values(d ?? {});
   return raw.filter((x) => x && typeof x.session_id === "string").map((x) => ({
-    id: x.session_id, title: sessionTitle(x.session_id), messages: Number(x.message_count ?? 0),
+    id: x.session_id, title: (typeof x.title === "string" && x.title.trim()) || sessionTitle(x.session_id), messages: Number(x.message_count ?? 0),
     created_at: Number(x.created_at ?? 0), last_activity_at: Number(x.last_activity_at ?? 0), busy: !!x.busy,
   })).sort((a, b) => b.last_activity_at - a.last_activity_at).slice(0, 50);
 }
