@@ -146,6 +146,14 @@
   #askctx.on{display:block}
   #askctx .q{font:12/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#e8c9a6;
     white-space:pre-wrap;word-break:break-word;margin:0}
+  /* Same block, in the chat view, sitting on the composer that answers it. */
+  #chatask{display:none;background:#12161d;border-top:1px solid #5c3a1c;
+    padding:9px 13px;max-height:40vh;overflow:auto;flex:none}
+  #chatask.on{display:block}
+  #chatask .q{font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace;color:#e8c9a6;
+    white-space:pre-wrap;word-break:break-word;margin:0}
+  #chatpresets{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
+
   #presetrow{display:flex;gap:5px;flex-wrap:wrap;margin-top:8px}
   .preset{background:#241a10;border:1px solid #5c3a1c;color:#f0c48e;border-radius:5px;
     padding:3px 9px;font:inherit;font-size:11.5px;cursor:pointer}
@@ -592,6 +600,13 @@
 
     <div id="chatview">
       <div id="msgs"></div>
+      <!-- A blocked pane's question, in the chat view. Without the stream
+           protocol there is no permission_request frame to render, and a
+           pending prompt is not written to the transcript until it resolves —
+           so a chat viewer would watch the conversation simply stop. herdr has
+           already classified the pane as blocked by reading its screen; this
+           shows what that screen says, above the composer that answers it. -->
+      <div id="chatask"><div class="q" id="chataskq"></div><div id="chatpresets"></div></div>
       <div id="composer">
         <div id="attachbar"></div>
         <div class="crow">

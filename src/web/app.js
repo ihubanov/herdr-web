@@ -21,6 +21,7 @@ const el = {
   frameclose: $("frameclose"),
   frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
   framebar: $("framebar"), framemax: $("framemax"), framestop: $("framestop"),
+  chatask: $("chatask"), chataskq: $("chataskq"), chatpresets: $("chatpresets"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
   divider: $("divider"), toggleside: $("toggleside"), drawerscrim: $("drawerscrim"), fleetbtn: $("fleetbtn"), triage: $("triage"),
   newspace: $("newspace"), modal: $("modal"), mtitle: $("mtitle"), msub: $("msub"),
@@ -1281,11 +1282,41 @@ el.newspace.onclick = newSpace;
  * agent's echo and reimplement its input line — and the result of doing that
  * properly IS the composer.
  */
+/**
+ * A blocked pane's question, shown in the chat view.
+ *
+ * Without the stream protocol there is no permission_request frame to render,
+ * and a PENDING prompt is not in the transcript until it resolves — so a chat
+ * viewer watches the conversation simply stop, with nothing saying that
+ * anything is waiting. herdr has already classified the pane as blocked by
+ * reading its screen (that is what the claude.toml manifest matches), and
+ * herdr-web already pulls that screen for the fleet preview. This surfaces the
+ * same text where it can be answered.
+ *
+ * Reading a live screen is not the same as reconstructing a prompt from
+ * history: this says "the terminal is waiting, here is what it shows", which is
+ * true, rather than fabricating a request nobody can answer.
+ */
+function renderChatAsk(f) {
+  const show = !!(f && f.agent_status === "blocked" && f.preview?.length);
+  el.chatask.classList.toggle("on", show);
+  if (!show) { el.chatpresets.innerHTML = ""; return; }
+  el.chataskq.textContent = f.preview.join("\n");
+  el.chatpresets.innerHTML = PRESETS
+    .map((p) => `<button class="preset" data-text="${esc(p.text)}">${esc(p.label)}</button>`)
+    .join("");
+  el.chatpresets.querySelectorAll(".preset").forEach((b) => {
+    b.onclick = () => send(f.pane_id, b.dataset.text, b);
+  });
+}
+
 function renderChat() {
   const on = view === "terminal" && !!selected;
   if (view === "chat") { el.askctx.classList.remove("on"); el.statusbar.classList.add("on"); }
   const f = on ? entry(selected) : null;
   const blocked = f?.agent_status === "blocked";
+
+  renderChatAsk(view === "chat" && selected ? entry(selected) : null);
 
   // Question context + presets sit ABOVE the terminal, next to the question.
   el.askctx.classList.toggle("on", !!(blocked && f?.preview?.length));
