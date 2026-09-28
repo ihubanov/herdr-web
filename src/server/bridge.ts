@@ -553,6 +553,8 @@ interface WsData {
   kind: "events" | "terminal" | "stream" | "novnc";
   paneId?: string;
   session?: TerminalSession;
+  /** How this pane wants attribution (resolved once at attach) — typed input prefixes only for "prefix". */
+  attrFmt?: AttrFmt;
   unsub?: () => void;
   /** Terminal sessions spawn lazily on the client's `init` message. */
   started?: boolean;
@@ -610,9 +612,12 @@ function forwardInput(ws: any, d: WsData, text: string) {
     return;
   }
 
-  // HERDR_WEB_ATTRIBUTION=none applies to live typing too: a prefix in the body breaks slash
-  // commands ("bart: /clear" is a message, not a command) and pollutes the conversation.
-  const prefix = ATTRIBUTION !== "none" && d.who && d.who !== "operator" ? `${d.who}: ` : "";
+  // Live typing gets a prefix ONLY when the pane's attribution format is the legacy prefix.
+  // A pane that asked for json1 (or none) must never see "<user>: " in the body: keystrokes
+  // cannot form an envelope, so the correct attribution for typed input there is none at all —
+  // "bart: /mcp" is a message, not a command (Ivo, 2026-09-28, twice).
+  const fmt = d.attrFmt ?? (ATTRIBUTION === "none" ? "none" : "prefix");
+  const prefix = fmt === "prefix" && d.who && d.who !== "operator" ? `${d.who}: ` : "";
   if (!prefix) { d.session.write(text); return; }
 
   if (SUBMIT.test(text)) {
@@ -942,6 +947,9 @@ const server = Bun.serve<WsData>({
           takeover: mode === "control" && msg.takeover !== false,
         });
         d.session = session;
+        // Resolve the pane's attribution format now, so typed input never prefixes a json1/none pane.
+        d.attrFmt = ATTRIBUTION === "none" ? "none" : "prefix";
+        void attrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
         d.lineHasContent = false;
         session.onData((bytes) => { try { ws.send(bytes); } catch {} });
         session.onClose((reason) => {
