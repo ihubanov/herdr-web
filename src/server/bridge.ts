@@ -559,6 +559,8 @@ interface WsData {
   /** Terminal sessions spawn lazily on the client's `init` message. */
   started?: boolean;
   who?: string;
+  /** A polite control bid already fell back to observe; never retry. */
+  fellBack?: boolean;
   /** Has the current line any typed content? Drives submit-time attribution. */
   lineHasContent?: boolean;
   /** Structured agent stream, for the chat view. */
@@ -945,25 +947,44 @@ const server = Bun.serve<WsData>({
         if (d.started) return;
         d.started = true;
         const mode: "observe" | "control" = msg.mode === "control" ? "control" : "observe";
-        const session = openTerminalSession({
-          paneId: d.paneId,
-          cols: Number(msg.cols) || 80,
-          rows: Number(msg.rows) || 24,
-          mode,
-          takeover: mode === "control" && msg.takeover !== false,
-        });
-        d.session = session;
+        const takeover = mode === "control" && msg.takeover !== false;
+        const cols = Number(msg.cols) || 80;
+        const rows = Number(msg.rows) || 24;
+
+        // Wiring a session up happens twice: once for the requested mode, and
+        // again if a polite control bid has to fall back. Hence a function.
+        const wire = (sess: TerminalSession, asMode: "observe" | "control") => {
+          d.session = sess;
+          sess.onData((bytes) => { try { ws.send(bytes); } catch {} });
+          sess.onClose((reason) => {
+            // A control bid made WITHOUT takeover is an offer, not a demand.
+            // herdr refuses it when someone already holds the terminal, and the
+            // refusal CLOSES the session — measured: "already has an attached
+            // client; retry with --takeover". Falling back to observe is what
+            // makes the offer safe to make; without it, opening a pane someone
+            // else controls would blank the viewer's terminal, which is worse
+            // than the geometry problem the bid exists to solve.
+            if (asMode === "control" && !takeover && !d.fellBack
+                && /already has an attached client/i.test(String(reason))) {
+              d.fellBack = true;
+              try {
+                wire(openTerminalSession({ paneId: d.paneId!, cols, rows, mode: "observe" }), "observe");
+                ws.send(JSON.stringify({ type: "_attached", mode: "observe" }));
+              } catch { /* pane went away mid-fallback */ }
+              return;
+            }
+            try { ws.send(JSON.stringify({ type: "_closed", reason })); } catch {}
+            try { ws.close(1000, String(reason).slice(0, 120)); } catch {}
+          });
+        };
+
+        wire(openTerminalSession({ paneId: d.paneId, cols, rows, mode, takeover }), mode);
         // Resolve the pane's attribution format now, so typed input never prefixes a json1/none pane.
         // Same asymmetry as in forwardInput: only an explicit "prefix" is safe to
         // assume before the token has been read.
         d.attrFmt = ATTRIBUTION === "prefix" ? "prefix" : undefined;
         void attrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
         d.lineHasContent = false;
-        session.onData((bytes) => { try { ws.send(bytes); } catch {} });
-        session.onClose((reason) => {
-          try { ws.send(JSON.stringify({ type: "_closed", reason })); } catch {}
-          try { ws.close(1000, String(reason).slice(0, 120)); } catch {}
-        });
         try { ws.send(JSON.stringify({ type: "_attached", mode })); } catch {}
         return;
       }

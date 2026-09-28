@@ -302,7 +302,21 @@ function attach(f, mode = "observe") {
     try { m = JSON.parse(e.data); } catch { term.write(e.data); return; }
     if (m.type === "_ready") {
       try { fit.fit(); } catch {}
-      ws.send(JSON.stringify({ type: "init", cols: term.cols, rows: term.rows, mode }));
+      // Open with a POLITE control bid rather than observe. herdr applies a
+      // viewer's cols/rows only to a control session, so an observer's terminal
+      // keeps the pane at whatever geometry it launched with — on a card nobody
+      // has controlled yet that is herdr's default 120 columns, in a window
+      // twice that wide, and it is the first thing every card shows now that
+      // terminal is the default view.
+      //
+      // takeover:false makes it an offer: if someone already holds the pane the
+      // bid is refused and the bridge falls back to observe, which is exactly
+      // today's behaviour. Typing still escalates with takeover, as before.
+      ws.send(JSON.stringify({
+        type: "init", cols: term.cols, rows: term.rows,
+        mode: mode === "observe" ? "control" : mode,
+        takeover: mode !== "observe",
+      }));
     } else if (m.type === "_attached") {
       activeMode = m.mode;
       el.tstatus.textContent = m.mode === "control" ? "control — type in the terminal" : "read-only";
