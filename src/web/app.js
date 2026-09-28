@@ -877,7 +877,14 @@ function applyChatBtn(c) {
   // README "A blank terminal is not a bug": having no screen to read is the
   // property that makes the agent's own reports authoritative, and a screen to
   // scrape puts herdr's detector back in competition with them.
-  const stranded = !toTerm && view === "terminal";
+  // Not for a pane that draws its own TUI: its terminal is a real REPL, so
+  // "the conversation is in chat view" argues with the "typing as <user>"
+  // badge beside it and both are true. The hint exists for a terminal that
+  // never draws anything.
+  //
+  // Keyed on the pane SAYING pane_tui, never on its absence — a plain Claude
+  // Code pane draws a TUI and does not set it, so absence means "did not say".
+  const stranded = !toTerm && view === "terminal" && !c?.tui;
   el.chatbtn.classList.toggle("nudge", stranded);
   if (stranded) el.tstatus.textContent = "the conversation for this pane is in chat view";
 }

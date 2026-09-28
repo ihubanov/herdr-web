@@ -436,6 +436,13 @@ function sessionIdFor(pane: any): string {
   return String(pane?.agent_session?.value ?? "").trim();
 }
 
+/** A pane's metadata tokens, or an empty object if it has vanished. */
+async function paneTokens(paneId: string): Promise<Record<string, string>> {
+  try {
+    return (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+  } catch { return {}; }
+}
+
 /** The pane token TTL. Short on purpose: a crashed session's view expires. */
 const ADVERTISE_TTL_MS = 300_000;
 const ADVERTISE_REFRESH_MS = 120_000;
@@ -1303,6 +1310,12 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           source: cap ? "live" : (transcript ? "transcript" : null),
           capability: cap,
           transcript: transcript ? { session: transcript.session } : null,
+          // Does this pane draw its own TUI? A pane SAYS so with pane_tui; only
+          // presence means anything. Absence is not "draws nothing" — a plain
+          // Claude Code pane draws a full TUI and has never set this token — so
+          // this may suppress a hint, never enable behaviour that assumes a
+          // blank terminal.
+          tui: !!(await paneTokens(paneId)).pane_tui,
           iframe, iframeRejected, iframePolicy: IFRAME_POLICY,
         });
       }
