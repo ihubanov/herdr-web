@@ -226,7 +226,11 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
   // A pane that speaks the stream protocol ("live") draws no TUI at all — its terminal is a
   // launch banner for the life of the pane — so on first look it opens in chat whatever the
   // stored preference says; the toggle still works, and transcript-only panes keep the preference.
-  if (firstLook && c?.stream && (preferChat || c?.source === "live") && view === "terminal") openChat(paneId);
+  if (firstLook && c?.stream && (preferChat || c?.source === "live") && !c?.tui && view === "terminal") openChat(paneId);
+  // The mirror rule: a pane that SAYS it draws its own TUI opens in the terminal on first look —
+  // that terminal IS the conversation (Ivo 2026-09-28: "we need to make terminal the default
+  // mode"). The toggle still works for the session; the stored preference is for the rest.
+  if (firstLook && c?.tui && view === "chat") { closeChat(); setView("terminal"); }
 
   // The button is always available on a selected pane, not only when an agent
   // happened to advertise something: with nothing advertised it STARTS a shared
@@ -267,7 +271,7 @@ function attach(f, mode = "observe") {
   capability = known;
   // If we already know this pane streams, go straight to chat rather than
   // showing the terminal and yanking it away a moment later.
-  const toChat = !!known?.stream && (preferChat || known?.source === "live");
+  const toChat = !!known?.stream && (preferChat || known?.source === "live") && !known?.tui;
   setView(toChat ? "chat" : "terminal");
   el.crumb.innerHTML = `<b>${esc(f.title)}</b>${f.task ? ` — ${esc(f.task)}` : ""}`;
   el.ctlmeta.textContent = [f.repo, f.branch, f.cwd].filter(Boolean).join("  ·  ");
