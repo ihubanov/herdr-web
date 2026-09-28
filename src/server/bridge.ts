@@ -13,13 +13,14 @@ import { mkdir, writeFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, extname, normalize } from "node:path";
 import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
-import { openTerminalSession, type TerminalSession } from "./terminal-bridge.ts";
+// Terminal sessions are opened only by shared-terminal.ts, which owns their lifetime.
 import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from "./fleet.ts";
 import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending, type AttrFmt } from "./send-queue.ts";
 import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
+import * as SharedTerm from "./shared-terminal.ts";
 
 // Loopback by default. HERDR_WEB_HOST widens the bind (e.g. 0.0.0.0 inside a container whose
 // port is published to a LAN address that a tunnel fronts). The token stays mandatory either
@@ -552,17 +553,16 @@ const MIME: Record<string, string> = {
 interface WsData {
   kind: "events" | "terminal" | "stream" | "novnc";
   paneId?: string;
-  session?: TerminalSession;
+  /** This socket's seat in the pane's SHARED terminal session. */
+  viewerId?: number;
+  /** The shared session's mode, as last reported to this socket. */
+  termMode?: "observe" | "control";
   /** How this pane wants attribution (resolved once at attach) — typed input prefixes only for "prefix". */
   attrFmt?: AttrFmt;
   unsub?: () => void;
   /** Terminal sessions spawn lazily on the client's `init` message. */
   started?: boolean;
   who?: string;
-  /** A polite control bid already fell back to observe; never retry. */
-  fellBack?: boolean;
-  /** Has the current line any typed content? Drives submit-time attribution. */
-  lineHasContent?: boolean;
   /** Structured agent stream, for the chat view. */
   stream?: StreamHandle;
   /** Transcript follower, for agents with no live protocol socket. */
@@ -608,11 +608,18 @@ const SUBMIT = /[\r\n]/;
  * the only channel is keystrokes.
  */
 function forwardInput(ws: any, d: WsData, text: string) {
-  if (!d.session) return;
-  if (d.session.mode !== "control") {
-    try { ws.send(JSON.stringify({ type: "_readonly" })); } catch {}
-    return;
+  if (!d.paneId || d.viewerId === undefined) return;
+  // Everyone attached to a shared session can type. When the session is only
+  // WATCHING a pane something else holds, the first keystroke escalates it —
+  // for everyone, since they share the one session. Seizing a pane is a
+  // deliberate act, which is why it happens on a keystroke and not on opening.
+  if (SharedTerm.modeOf(d.paneId) !== "control") {
+    if (!SharedTerm.takeControl(d.paneId)) {
+      try { ws.send(JSON.stringify({ type: "_readonly" })); } catch {}
+      return;
+    }
   }
+  const put = (t: string) => SharedTerm.write(d.paneId!, t);
 
   // Live typing gets a prefix ONLY when the pane's attribution format is the legacy prefix.
   // A pane that asked for json1 (or none) must never see "<user>: " in the body: keystrokes
@@ -626,27 +633,32 @@ function forwardInput(ws: any, d: WsData, text: string) {
   // keystrokes, which a json1 pane cannot carry anyway.
   const fmt = d.attrFmt ?? (ATTRIBUTION === "prefix" ? "prefix" : "none");
   const prefix = fmt === "prefix" && d.who && d.who !== "operator" ? `${d.who}: ` : "";
-  if (!prefix) { d.session.write(text); return; }
+  if (!prefix) { put(text); return; }
+
+  // Whether the line already has content is a property of the LINE, and the
+  // line is shared: two people typing into one prompt append to one buffer, so
+  // a per-socket flag would prefix the same line twice. First typist names it.
+  const had = SharedTerm.lineHasContent(d.paneId);
 
   if (SUBMIT.test(text)) {
     // The prefix is already in the line if there was anything to attribute.
     // A bare Enter stays bare, so a submit on an empty line adds nothing.
     const [before, ...rest] = text.split(/([\r\n])/);
     if (before) {
-      if (!d.lineHasContent && PRINTABLE.test(before)) d.session.write(prefix);
-      d.session.write(before);
+      if (!had && PRINTABLE.test(before)) put(prefix);
+      put(before);
     }
-    d.session.write(rest.join(""));
-    d.lineHasContent = false;
+    put(rest.join(""));
+    SharedTerm.setLineHasContent(d.paneId, false);
     return;
   }
 
   // First printable character of a line carries the prefix in front of it.
   if (PRINTABLE.test(text)) {
-    if (!d.lineHasContent) d.session.write(prefix);
-    d.lineHasContent = true;
+    if (!had) put(prefix);
+    SharedTerm.setLineHasContent(d.paneId, true);
   }
-  d.session.write(text);
+  put(text);
 }
 
 const server = Bun.serve<WsData>({
@@ -946,54 +958,46 @@ const server = Bun.serve<WsData>({
       if (msg?.type === "init") {
         if (d.started) return;
         d.started = true;
-        const mode: "observe" | "control" = msg.mode === "control" ? "control" : "observe";
-        const takeover = mode === "control" && msg.takeover !== false;
-        const cols = Number(msg.cols) || 80;
-        const rows = Number(msg.rows) || 24;
 
-        // Wiring a session up happens twice: once for the requested mode, and
-        // again if a polite control bid has to fall back. Hence a function.
-        const wire = (sess: TerminalSession, asMode: "observe" | "control") => {
-          d.session = sess;
-          sess.onData((bytes) => { try { ws.send(bytes); } catch {} });
-          sess.onClose((reason) => {
-            // A control bid made WITHOUT takeover is an offer, not a demand.
-            // herdr refuses it when someone already holds the terminal, and the
-            // refusal CLOSES the session — measured: "already has an attached
-            // client; retry with --takeover". Falling back to observe is what
-            // makes the offer safe to make; without it, opening a pane someone
-            // else controls would blank the viewer's terminal, which is worse
-            // than the geometry problem the bid exists to solve.
-            if (asMode === "control" && !takeover && !d.fellBack
-                && /already has an attached client/i.test(String(reason))) {
-              d.fellBack = true;
-              try {
-                wire(openTerminalSession({ paneId: d.paneId!, cols, rows, mode: "observe" }), "observe");
-                ws.send(JSON.stringify({ type: "_attached", mode: "observe" }));
-              } catch { /* pane went away mid-fallback */ }
-              return;
-            }
+        // Join the pane's SHARED session rather than opening one of our own.
+        // herdr permits a single attached client per terminal; the bridge is
+        // that client, and every viewer here is a seat at it. Two people can
+        // therefore both type and both watch, which one herdr session per
+        // socket could never do — the second attach was refused outright.
+        d.viewerId = SharedTerm.viewerId();
+        const mode = SharedTerm.join(d.paneId, {
+          id: d.viewerId,
+          cols: Number(msg.cols) || 80,
+          rows: Number(msg.rows) || 24,
+          onData: (bytes) => { try { ws.send(bytes); } catch {} },
+          onMode: (m) => {
+            d.termMode = m;
+            try { ws.send(JSON.stringify({ type: "_attached", mode: m })); } catch {}
+          },
+          onClose: (reason) => {
             try { ws.send(JSON.stringify({ type: "_closed", reason })); } catch {}
             try { ws.close(1000, String(reason).slice(0, 120)); } catch {}
-          });
-        };
+          },
+        });
+        d.termMode = mode;
 
-        wire(openTerminalSession({ paneId: d.paneId, cols, rows, mode, takeover }), mode);
         // Resolve the pane's attribution format now, so typed input never prefixes a json1/none pane.
         // Same asymmetry as in forwardInput: only an explicit "prefix" is safe to
         // assume before the token has been read.
         d.attrFmt = ATTRIBUTION === "prefix" ? "prefix" : undefined;
         void attrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
-        d.lineHasContent = false;
         try { ws.send(JSON.stringify({ type: "_attached", mode })); } catch {}
         return;
       }
 
-      if (!d.session) return; // not initialised yet
+      if (d.viewerId === undefined) return; // not initialised yet
 
-      if (msg?.type === "resize") { d.session.resize(msg.cols, msg.rows); return; }
+      if (msg?.type === "resize") {
+        SharedTerm.resize(d.paneId, d.viewerId, Number(msg.cols) || 80, Number(msg.rows) || 24);
+        return;
+      }
       if (msg?.type === "scroll") {
-        d.session.scroll(msg.direction === "down" ? "down" : "up", msg.lines ?? 3);
+        SharedTerm.scroll(d.paneId, msg.direction === "down" ? "down" : "up", msg.lines ?? 3);
         return;
       }
       if (msg?.type === "input")  { forwardInput(ws, d, msg.text ?? ""); return; }
@@ -1008,7 +1012,13 @@ const server = Bun.serve<WsData>({
       ws.data.tail?.close();
       if (ws.data.up) { try { ws.data.up.close(); } catch {} }
       ws.data.unsub?.();
-      ws.data.session?.release();
+      // Leave the shared session. The LAST viewer out closes it — a session
+      // left holding a pane nobody is watching would block herdr's own TUI from
+      // attaching without a takeover, so every exit path has to come through
+      // here, including this one, which also runs on an error close.
+      if (ws.data.kind === "terminal" && ws.data.paneId && ws.data.viewerId !== undefined) {
+        SharedTerm.leave(ws.data.paneId, ws.data.viewerId);
+      }
       if ((ws.data.kind === "terminal" || ws.data.kind === "stream") && ws.data.paneId) {
         leavePane(ws.data.paneId, ws.data.who || "operator");
       }
@@ -1236,7 +1246,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           for (const ws of liveSockets) {
             conns.push({ kind: ws.data?.kind, who: ws.data?.who,
                          pane_id: ws.data?.paneId ?? null,
-                         mode: ws.data?.session?.mode ?? null });
+                         mode: ws.data?.termMode ?? null });
           }
           return Response.json({
             connections: conns,
@@ -1249,13 +1259,10 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         if (req.method === "POST" && url.pathname === "/api/admin/release-control") {
           const { pane_id } = (await req.json().catch(() => ({}))) as any;
           if (!pane_id) return Response.json({ error: "pane_id required" }, { status: 400 });
-          let n = 0;
-          for (const ws of [...liveSockets]) {
-            if (ws.data?.kind === "terminal" && ws.data.paneId === pane_id
-                && ws.data.session?.mode === "control") {
-              try { ws.data.session.release(); ws.close(1000, "control released by admin"); n++; } catch {}
-            }
-          }
+          // One shared session per pane now, so this releases the pane itself
+          // rather than one person's grip on it — which is what an admin asking
+          // to free a pane wants, and everyone watching is told.
+          const n = SharedTerm.release(String(pane_id), "control released by admin");
           return Response.json({ released: n });
         }
 
@@ -1271,7 +1278,9 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           let n = 0;
           for (const ws of [...liveSockets]) {
             if (ws.data?.who === who) {
-              try { ws.data.session?.release(); ws.close(1000, "disconnected by admin"); n++; } catch {}
+              // Closing the socket is enough: the close handler leaves the
+              // shared session, and the last one out releases the pane.
+              try { ws.close(1000, "disconnected by admin"); n++; } catch {}
             }
           }
           return Response.json({ disconnected: n, who });

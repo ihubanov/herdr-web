@@ -312,11 +312,11 @@ function attach(f, mode = "observe") {
       // takeover:false makes it an offer: if someone already holds the pane the
       // bid is refused and the bridge falls back to observe, which is exactly
       // today's behaviour. Typing still escalates with takeover, as before.
-      ws.send(JSON.stringify({
-        type: "init", cols: term.cols, rows: term.rows,
-        mode: mode === "observe" ? "control" : mode,
-        takeover: mode !== "observe",
-      }));
+      // Mode is decided by the bridge now: every viewer joins the pane's one
+      // shared session, and they all type into it. What we send is our size,
+      // which is what the pane is fitted to (the smallest viewer wins, so
+      // everyone sees whole lines).
+      ws.send(JSON.stringify({ type: "init", cols: term.cols, rows: term.rows }));
     } else if (m.type === "_attached") {
       activeMode = m.mode;
       el.tstatus.textContent = m.mode === "control" ? "control — type in the terminal" : "read-only";
