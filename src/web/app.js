@@ -2054,6 +2054,32 @@ function nearBottom() {
 
 let lastSpeaker = null;          // suppress a repeated badge on the same speaker
 
+/**
+ * Strip <system-reminder> blocks, keeping what one of them tells us.
+ *
+ * They are instructions to the agent, not things a person said, so rendering
+ * them inside the user's bubble shows the reader plumbing they did not write.
+ * One of them matters: with attr_fmt=json1 the harness announces the author of
+ * a message ("This one is from bart."), which is the same fact the badge column
+ * exists to show. Lift it out and label the message with it.
+ *
+ * Deliberately narrow — an unrecognised reminder is dropped from the bubble and
+ * nothing is guessed from it. A parser that mined these for meaning would be
+ * reading someone else's protocol.
+ */
+function liftReminders(raw) {
+  let author = null;
+  const text = String(raw ?? "").replace(
+    /<system-reminder>([\s\S]*?)<\/system-reminder>/gi,
+    (_, body) => {
+      const m = /attributed[\s\S]*?from\s+([^.\n]+)\./i.exec(body);
+      if (m) author = m[1].trim();
+      return "";
+    },
+  ).trim();
+  return { text, author };
+}
+
 function speakerOf(author, isAgent) {
   return isAgent ? `agent:${me?.agentName || "agent"}` : `user:${author || "user"}`;
 }
@@ -2429,10 +2455,16 @@ function handleFrame(f) {
     // hierarchy is the point — a flat list loses which output came from where.
     if (c.type === "text" && c.text?.trim()) {
       endToolGroup(!renderingHistory);
-      const t = `<div class="md">${mdToHtml(c.text)}</div>`;
-      msgBlock(f.author, isAgent,
+      // A <system-reminder> is harness plumbing, not conversation. The one that
+      // carries attribution is the exception worth reading: it names the author
+      // the envelope delivered, which is precisely what the badge column wants,
+      // so it becomes the label instead of a paragraph inside the bubble.
+      const { text, author } = liftReminders(c.text);
+      if (!text.trim()) continue;                  // the block was only plumbing
+      const t = `<div class="md">${mdToHtml(text)}</div>`;
+      msgBlock(author ?? f.author, isAgent,
         `<div class="line"><span class="glyph dot">●</span>` +
-        (c.text.length > 2600 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
+        (text.length > 2600 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
     } else if (c.type === "thinking" && c.thinking?.trim()) {
       endToolGroup(!renderingHistory);
       const t = `<div class="md">${mdToHtml(c.thinking)}</div>`;
