@@ -616,7 +616,13 @@ function forwardInput(ws: any, d: WsData, text: string) {
   // A pane that asked for json1 (or none) must never see "<user>: " in the body: keystrokes
   // cannot form an envelope, so the correct attribution for typed input there is none at all —
   // "bart: /mcp" is a message, not a command (Ivo, 2026-09-28, twice).
-  const fmt = d.attrFmt ?? (ATTRIBUTION === "none" ? "none" : "prefix");
+  // Until the pane's format is known, assume NO prefix. Under "auto" the answer
+  // depends on a token we have not read yet, and the two wrong guesses are not
+  // equal: guessing "prefix" on a json1 pane reproduces the bug — a stray
+  // "bart: " on the first line typed after attach, which is a broken command if
+  // that line is a slash command. Guessing "none" only loses attribution on
+  // keystrokes, which a json1 pane cannot carry anyway.
+  const fmt = d.attrFmt ?? (ATTRIBUTION === "prefix" ? "prefix" : "none");
   const prefix = fmt === "prefix" && d.who && d.who !== "operator" ? `${d.who}: ` : "";
   if (!prefix) { d.session.write(text); return; }
 
@@ -948,7 +954,9 @@ const server = Bun.serve<WsData>({
         });
         d.session = session;
         // Resolve the pane's attribution format now, so typed input never prefixes a json1/none pane.
-        d.attrFmt = ATTRIBUTION === "none" ? "none" : "prefix";
+        // Same asymmetry as in forwardInput: only an explicit "prefix" is safe to
+        // assume before the token has been read.
+        d.attrFmt = ATTRIBUTION === "prefix" ? "prefix" : undefined;
         void attrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
         d.lineHasContent = false;
         session.onData((bytes) => { try { ws.send(bytes); } catch {} });
