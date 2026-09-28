@@ -603,7 +603,9 @@ function forwardInput(ws: any, d: WsData, text: string) {
     return;
   }
 
-  const prefix = d.who && d.who !== "operator" ? `${d.who}: ` : "";
+  // HERDR_WEB_ATTRIBUTION=none applies to live typing too: a prefix in the body breaks slash
+  // commands ("bart: /clear" is a message, not a command) and pollutes the conversation.
+  const prefix = ATTRIBUTION !== "none" && d.who && d.who !== "operator" ? `${d.who}: ` : "";
   if (!prefix) { d.session.write(text); return; }
 
   if (SUBMIT.test(text)) {
