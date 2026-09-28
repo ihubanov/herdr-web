@@ -87,6 +87,9 @@ let capability = null;            // structured-stream capability of the open pa
 // terminal sticks, so someone who prefers the raw pane isn't fighting the app
 // on every open. Panes with no stream ignore this entirely.
 let preferChat = LS.get("preferChat", null) ?? true;
+/** Chat chosen explicitly ON a pane that draws its own TUI. Separate from
+ *  preferChat: terminal is the default for those, and this is the opt-out. */
+let tuiChat = LS.get("tuiChat", null) ?? false;
 // Capability is a per-pane round trip. Caching it means only the FIRST open of
 // a pane can flash the terminal before landing on chat; every later open goes
 // straight there.
@@ -226,11 +229,12 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
   // A pane that speaks the stream protocol ("live") draws no TUI at all — its terminal is a
   // launch banner for the life of the pane — so on first look it opens in chat whatever the
   // stored preference says; the toggle still works, and transcript-only panes keep the preference.
-  if (firstLook && c?.stream && (preferChat || c?.source === "live") && !c?.tui && view === "terminal") openChat(paneId);
+  if (firstLook && c?.stream && (preferChat || c?.source === "live")
+      && (!c?.tui || tuiChat) && view === "terminal") openChat(paneId);
   // The mirror rule: a pane that SAYS it draws its own TUI opens in the terminal on first look —
   // that terminal IS the conversation (Ivo 2026-09-28: "we need to make terminal the default
   // mode"). The toggle still works for the session; the stored preference is for the rest.
-  if (firstLook && c?.tui && view === "chat") { closeChat(); setView("terminal"); }
+  if (firstLook && c?.tui && !tuiChat && view === "chat") { closeChat(); setView("terminal"); }
 
   // The button is always available on a selected pane, not only when an agent
   // happened to advertise something: with nothing advertised it STARTS a shared
@@ -271,7 +275,8 @@ function attach(f, mode = "observe") {
   capability = known;
   // If we already know this pane streams, go straight to chat rather than
   // showing the terminal and yanking it away a moment later.
-  const toChat = !!known?.stream && (preferChat || known?.source === "live") && !known?.tui;
+  const toChat = !!known?.stream && (preferChat || known?.source === "live")
+    && (!known?.tui || tuiChat);
   setView(toChat ? "chat" : "terminal");
   el.crumb.innerHTML = `<b>${esc(f.title)}</b>${f.task ? ` — ${esc(f.task)}` : ""}`;
   el.ctlmeta.textContent = [f.repo, f.branch, f.cwd].filter(Boolean).join("  ·  ");
@@ -897,6 +902,15 @@ el.chatbtn.onclick = () => {
   // An explicit switch is a preference, not a one-off.
   preferChat = view !== "chat";
   LS.set("preferChat", preferChat);
+  // A TUI pane opens in the terminal by default, and a default has to be
+  // overridable or it is a rule. Choosing chat ON a TUI pane is that override,
+  // remembered separately so it cannot be confused with the general preference
+  // — someone who wants chat on TUI cards should not have to re-click every
+  // time they visit another card and come back.
+  if (selected && capability?.tui) {
+    tuiChat = preferChat;
+    LS.set("tuiChat", tuiChat);
+  }
   if (view === "chat") { closeChat(); setView("terminal"); }
   else if (selected && chatAvailable()) openChat(selected);
 };
