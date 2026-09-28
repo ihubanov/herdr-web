@@ -1311,6 +1311,21 @@ el.newspace.onclick = newSpace;
  */
 let askAnswered = "";
 
+/**
+ * Does this screen look like a question the presets can answer?
+ *
+ * "yes"/"no" are answers to a permission prompt. They are NOT answers to an
+ * arrow-key menu — /mcp draws a server list navigated with ↑↓ and confirmed
+ * with Enter, and offering "yes / continue / no / explain" beside it invites a
+ * reply that does nothing. Better to show the question and say where it can be
+ * answered than to offer buttons that do not fit it.
+ */
+function presetsFit(lines) {
+  const t = lines.join("\n").toLowerCase();
+  if (/to navigate|↑↓|to confirm/.test(t)) return false;          // a menu, not a question
+  return /do you want|proceed\?|\b1\.\s*yes|\(y\/n\)/.test(t);
+}
+
 function renderChatAsk(f) {
   const blocked = !!(f && f.agent_status === "blocked" && f.preview?.length);
   const key = blocked ? `${f.pane_id}\u0000${f.preview.join("\n")}` : "";
@@ -1318,6 +1333,16 @@ function renderChatAsk(f) {
   el.chatask.classList.toggle("on", show);
   if (!show) { el.chatpresets.innerHTML = ""; return; }
   el.chataskq.textContent = f.preview.join("\n");
+
+  if (!presetsFit(f.preview)) {
+    // Say so rather than offering the wrong buttons. The composer still works,
+    // and for a menu the terminal is genuinely the right place.
+    el.chatpresets.innerHTML =
+      `<span class="hint">this one needs the terminal — it is navigated with ` +
+      `arrow keys</span>`;
+    return;
+  }
+
   el.chatpresets.innerHTML = PRESETS
     .map((p) => `<button class="preset" data-text="${esc(p.text)}">${esc(p.label)}</button>`)
     .join("");
@@ -1341,12 +1366,16 @@ function renderChat() {
 
   renderChatAsk(view === "chat" && selected ? entry(selected) : null);
 
-  // Question context + presets sit ABOVE the terminal, next to the question.
-  el.askctx.classList.toggle("on", !!(blocked && f?.preview?.length));
-  if (blocked && f?.preview?.length) el.askq.textContent = f.preview.join("\n");
-  el.presetrow.innerHTML = blocked
-    ? PRESETS.map((p) => `<button class="preset" data-text="${esc(p.text)}">${esc(p.label)}</button>`).join("")
-    : "";
+  // In the TERMINAL view the question is not shown at all, because the user is
+  // looking at it: the pane below renders the prompt itself. Reproducing it
+  // above was a duplicate of what is already on screen, and for a prompt that
+  // is not a yes/no — /mcp draws an arrow-key menu — the two halves disagreed
+  // about how to answer, offering buttons for a thing that wants ↑↓ and Enter.
+  //
+  // The panel earns its place in CHAT view only, where the prompt is somewhere
+  // the viewer cannot see. See renderChatAsk.
+  el.askctx.classList.remove("on");
+  el.presetrow.innerHTML = "";
   el.presetrow.querySelectorAll(".preset").forEach((b) => {
     b.onclick = () => send(selected, b.dataset.text, b);
   });
