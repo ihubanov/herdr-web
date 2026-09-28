@@ -568,10 +568,6 @@ interface WsData {
 const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
 const SUBMIT = /[\r\n]/;
 
-/** readline/emacs motions honoured by virtually every TUI input, incl. Ink. */
-const HOME = "\x01";   // ctrl+a
-const END  = "\x05";   // ctrl+e
-
 /**
  * Input is only meaningful in control mode; tell the UI instead of dropping
  * silently.
@@ -579,11 +575,26 @@ const END  = "\x05";   // ctrl+e
  * Attribution is applied HERE, from the authenticated identity on this
  * connection, so a client cannot type as someone else.
  *
- * It is injected at SUBMIT time, not as you type: on Enter we jump to the start
- * of the line, insert "<user>: ", jump back to the end, and only then submit.
- * The typist therefore never sees the prefix sitting in their input and cannot
- * backspace it away, while the agent still receives an attributed line. The
- * gutter badge in the browser is what tells them who they are typing as.
+ * It goes in when the line STARTS, not at submit time, because it has to reach
+ * the pty before the body does and nothing else guarantees that.
+ *
+ * The previous version was cleverer and wrong: on Enter it sent ctrl+a to jump
+ * home, wrote the prefix, sent ctrl+e to jump back, then submitted — so the
+ * typist never saw the prefix and could not backspace it away. That depends on
+ * the target honouring ctrl+a, and claude-local's Ink input does not. The
+ * prefix was then inserted wherever the cursor already was, which is the END,
+ * and the agent received "Heybart: " instead of "bart: Hey". Silently, and only
+ * on that agent.
+ *
+ * Writing it first depends on nothing but the order of two writes. The cost is
+ * that the typist sees "bart: " appear in their line and could delete it, which
+ * is a fair trade for output that is correct everywhere rather than elegant on
+ * the terminals that happen to implement a motion.
+ *
+ * None of this is the destination: the author belongs in a field, not glued to
+ * the message. A pane that advertises attr_fmt=json1 gets the envelope instead
+ * (see send-queue.ts) and never sees a prefix. This path is what is left when
+ * the only channel is keystrokes.
  */
 function forwardInput(ws: any, d: WsData, text: string) {
   if (!d.session) return;
@@ -596,22 +607,23 @@ function forwardInput(ws: any, d: WsData, text: string) {
   if (!prefix) { d.session.write(text); return; }
 
   if (SUBMIT.test(text)) {
-    // Only attribute a line that actually has content; a bare Enter stays bare.
-    if (d.lineHasContent) {
-      const [before, ...rest] = text.split(/([\r\n])/);
-      if (before) d.session.write(before);
-      d.session.write(HOME);
-      d.session.write(prefix);
-      d.session.write(END);
-      d.session.write(rest.join(""));
-    } else {
-      d.session.write(text);
+    // The prefix is already in the line if there was anything to attribute.
+    // A bare Enter stays bare, so a submit on an empty line adds nothing.
+    const [before, ...rest] = text.split(/([\r\n])/);
+    if (before) {
+      if (!d.lineHasContent && PRINTABLE.test(before)) d.session.write(prefix);
+      d.session.write(before);
     }
+    d.session.write(rest.join(""));
     d.lineHasContent = false;
     return;
   }
 
-  if (PRINTABLE.test(text)) d.lineHasContent = true;
+  // First printable character of a line carries the prefix in front of it.
+  if (PRINTABLE.test(text)) {
+    if (!d.lineHasContent) d.session.write(prefix);
+    d.lineHasContent = true;
+  }
   d.session.write(text);
 }
 
