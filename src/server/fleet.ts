@@ -47,13 +47,35 @@ interface Tracked { status: Status; since: number }
 
 const tracked = new Map<string, Tracked>();
 /** keyed by cwd, not workspace — see repoForCwd */
-const repoCache = new Map<string, { repo?: string; branch?: string; at: number }>();
+const repoCache = new Map<
+  string,
+  { repo?: string; branch?: string; at: number; definitive?: boolean }
+>();
 let snapshot: FleetEntry[] = [];
 let listeners: Array<(f: FleetEntry[]) => void> = [];
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 let inFlight = false;
 
 const REPO_TTL_MS = 30_000;
+
+/**
+ * How long a *definitive* "this cwd is not in a git work tree" is trusted.
+ *
+ * herdr answers a cwd outside any work tree with a typed `not_git_worktree`
+ * error — an authoritative empty-state, not a failure. It was cached with the
+ * ordinary 30s TTL, so the poll re-asked forever for every pane sitting in a
+ * non-repo directory: a third of the fleet on a normal box, and on jack's box
+ * 2,955 logged errors at exactly one per 30s, running indefinitely. The answer
+ * cannot change while the key holds: a pane that cd's into a repo arrives under
+ * a NEW cwd, so that lookup runs on a fresh key. Only `git init` in the *same*
+ * directory could invalidate it, which is why this is a long TTL rather than a
+ * permanent sentinel.
+ *
+ * A transport failure is NOT cached this way — herdr being briefly unreachable
+ * says nothing about whether the cwd is a repo. Those keep the short TTL.
+ */
+const NEG_REPO_TTL_MS = 30 * 60_000;
+
 const PREVIEW_LINES = 14;
 
 /**
@@ -136,7 +158,13 @@ function normStatus(s: unknown): Status {
 async function repoForCwd(cwd: string): Promise<{ repo?: string; branch?: string }> {
   if (!cwd) return {};
   const hit = repoCache.get(cwd);
-  if (hit && Date.now() - hit.at < REPO_TTL_MS) return { repo: hit.repo, branch: hit.branch };
+  if (hit) {
+    // A cached positive expires fast: the branch can change in place (checkout,
+    // rebase) without the cwd moving. A definitive negative lives long — see
+    // NEG_REPO_TTL_MS. An indeterminate entry (transport error) retries shortly.
+    const ttl = hit.definitive && !hit.repo ? NEG_REPO_TTL_MS : REPO_TTL_MS;
+    if (Date.now() - hit.at < ttl) return { repo: hit.repo, branch: hit.branch };
+  }
   try {
     const res = await call("worktree.list", { cwd });
     const repo = res?.source?.repo_name as string | undefined;
@@ -146,11 +174,15 @@ async function repoForCwd(cwd: string): Promise<{ repo?: string; branch?: string
     const contains = wts.find((w) => w.path && (cwd === w.path || cwd.startsWith(w.path + "/")));
     const match = contains ?? wts.find((w) => w.path === src) ?? wts[0];
     const branch = match?.is_detached ? "(detached)" : (match?.branch as string | undefined);
-    repoCache.set(cwd, { repo, branch, at: Date.now() });
+    repoCache.set(cwd, { repo, branch, at: Date.now(), definitive: true });
     return { repo, branch };
-  } catch {
-    // Not a git directory, or git unavailable — perfectly normal.
-    repoCache.set(cwd, { at: Date.now() });
+  } catch (err) {
+    // herdr answered, and the answer was "not a git work tree" — a definitive
+    // empty-state, safe to trust for a long time. Anything else (socket closed,
+    // timeout, herdr restarting) is transient and must not be mistaken for it,
+    // or a blip would blank the repo column for half an hour.
+    const definitive = /not_git_worktree/.test(err instanceof Error ? err.message : String(err));
+    repoCache.set(cwd, { at: Date.now(), definitive });
     return {};
   }
 }

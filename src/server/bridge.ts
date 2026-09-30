@@ -17,7 +17,7 @@ import { call, rpc, isErr, subscribe, socketPath } from "./herdr-socket.ts";
 import { startFleetTracker, getFleet, onFleet, refresh as refreshFleet } from "./fleet.ts";
 import { Identity, type User } from "./identity.ts";
 import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPending, type AttrFmt } from "./send-queue.ts";
-import { detect as detectStream, open as openStream, type StreamHandle } from "./agent-stream.ts";
+import { detect as detectStream, detectFromPane as detectStreamFromPane, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
 import * as SharedTerm from "./shared-terminal.ts";
@@ -267,6 +267,40 @@ async function attrFmtFor(paneId: string): Promise<AttrFmt> {
   return "prefix";
 }
 
+/**
+ * The format for TYPED keystrokes, which is deliberately stricter than
+ * attrFmtFor. The two answer different questions and the difference is the
+ * whole bug this exists to fix.
+ *
+ * attrFmtFor asks "how should attribution travel in a message this bridge
+ * submits for the user?" — and for a pane that says nothing the answer is the
+ * legacy in-line prefix, because a submitted message has to name its author
+ * somewhere or the agent cannot tell you from itself.
+ *
+ * A keystroke is not a submitted message. The user is typing in the pane
+ * directly, so a prefix there is not attribution, it is an edit to their line:
+ * "bart: /mcp" is not a command. So typed input prefixes ONLY when the pane
+ * explicitly asks for prefix, and a silent pane gets nothing.
+ *
+ * A plain `claude` pane advertises no attr_fmt at all, which is exactly the
+ * case that was broken: attrFmtFor's fallthrough resolved such a pane to
+ * "prefix", overwriting the attach-time "assume none" with its own answer a
+ * moment later — the fix held for the first keystroke and no more. An agent
+ * that wants the envelope (claude-local does, at herdr registration) advertises
+ * json1 and is unaffected either way, because keystrokes cannot form one.
+ */
+async function typedAttrFmtFor(paneId: string): Promise<AttrFmt> {
+  if (ATTRIBUTION === "json") return "json1";
+  if (ATTRIBUTION === "prefix") return "prefix";
+  if (ATTRIBUTION === "none") return "none";
+  try {
+    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+    const want = String(tokens.attr_fmt ?? "").trim().toLowerCase();
+    return want === "prefix" ? "prefix" : "none";
+  } catch { /* pane vanished; the safe answer is no prefix */ }
+  return "none";
+}
+
 const UPLOAD_DIR = process.env.HERDR_WEB_UPLOAD_DIR
   || join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "herdr-web", "uploads");
 const UPLOAD_MAX = Number(process.env.HERDR_WEB_UPLOAD_MAX_BYTES || 25 * 1024 * 1024);
@@ -363,30 +397,31 @@ function authed(req: Request): boolean {
 }
 
 /**
- * The local origin a pane advertises for its shared display.
+ * The URL a BROWSER should point at for a pane's advertised view, built from
+ * tokens already in hand. Never throws.
  *
- * The pane token still holds the real http://127.0.0.1:<port>/... URL, because
- * that is what is true ON THIS HOST. What must never reach a remote viewer is
- * that URL itself — their browser would resolve 127.0.0.1 to their own machine
- * and show nothing, which is exactly what happened behind the tunnel. So the
- * token stays the single source of truth and the bridge proxies it.
+ * A raw 127.0.0.1 URL is right on this host and useless to everyone else. The
+ * pane token still holds the real http://127.0.0.1:<port>/... URL, because that
+ * is what is true ON THIS HOST; what must never reach a remote viewer is that
+ * URL itself — their browser would resolve 127.0.0.1 to their own machine and
+ * show nothing, which is exactly what happened behind the tunnel. So the token
+ * stays the single source of truth and the bridge proxies it, rewriting a
+ * display we can proxy onto our own origin. Both /api/capability and /api/share
+ * answer with this, because a button and a tool call handing back different URLs
+ * for the same display is a bug waiting to happen.
  *
  * Only loopback targets are ever proxied: this turns herdr-web into an open
  * relay otherwise, reachable by anyone who can name a pane.
- */
-/**
- * The URL a BROWSER should point at for this pane's advertised view.
  *
- * A raw 127.0.0.1 URL is right on this host and useless to everyone else, so a
- * display we can proxy is rewritten onto our own origin. Both /api/capability
- * and /api/share answer with this, because a button and a tool call handing back
- * different URLs for the same display is a bug waiting to happen.
+ * Takes tokens rather than an id for the same reason as detectFromPane: the
+ * /api/capability handler resolves the pane once and passes them down. A caller
+ * holding only an id wants iframeForPane, which fetches them first.
  */
-async function iframeForPane(
+async function iframeFromTokens(
   paneId: string,
+  tokens: Record<string, string>,
 ): Promise<{ url?: string; rejected?: string }> {
   try {
-    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
     const raw = String(tokens.iframe_url ?? "").trim();
     if (!raw) return {};
     const v = iframeUrlAllowed(raw, IFRAME_POLICY, PORT);
@@ -399,6 +434,18 @@ async function iframeForPane(
       url: `/shared/${encodeURIComponent(paneId)}/` +
            (tail === "shared.html" ? "" : tail) + p.search,
     };
+  } catch {
+    return {};                                  // pane vanished
+  }
+}
+
+/** The advertised view for a caller that holds only a pane id. Never throws. */
+async function iframeForPane(
+  paneId: string,
+): Promise<{ url?: string; rejected?: string }> {
+  try {
+    const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
+    return await iframeFromTokens(paneId, tokens);
   } catch {
     return {};                                  // pane vanished
   }
@@ -435,13 +482,6 @@ function sessionIdFor(pane: any): string {
   const stated = String(t.stream_session ?? t.pane_session ?? "").trim();
   if (stated) return stated;
   return String(pane?.agent_session?.value ?? "").trim();
-}
-
-/** A pane's metadata tokens, or an empty object if it has vanished. */
-async function paneTokens(paneId: string): Promise<Record<string, string>> {
-  try {
-    return (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
-  } catch { return {}; }
 }
 
 /** The pane token TTL. Short on purpose: a crashed session's view expires. */
@@ -981,11 +1021,14 @@ const server = Bun.serve<WsData>({
         });
         d.termMode = mode;
 
-        // Resolve the pane's attribution format now, so typed input never prefixes a json1/none pane.
-        // Same asymmetry as in forwardInput: only an explicit "prefix" is safe to
-        // assume before the token has been read.
+        // Resolve the pane's format for TYPED input now — typedAttrFmtFor, not
+        // attrFmtFor. A submitted message must name its author somewhere; a
+        // keystroke must not be edited, so a pane that advertises nothing gets no
+        // prefix rather than the legacy default. Same asymmetry as in
+        // forwardInput: only an explicit "prefix" is safe to assume before the
+        // token has been read.
         d.attrFmt = ATTRIBUTION === "prefix" ? "prefix" : undefined;
-        void attrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
+        void typedAttrFmtFor(d.paneId!).then((f) => { d.attrFmt = f; }).catch(() => {});
         try { ws.send(JSON.stringify({ type: "_attached", mode })); } catch {}
         return;
       }
@@ -1321,20 +1364,62 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         return Response.json({ queued: m.id, state: m.state, pending: pendingFor(pane_id).length });
       }
 
-      // Does this pane's agent advertise herdr-agent-stream/1? One pane.get,
-      // asked only when a pane is opened — pane.list does not carry tokens, so
-      // sweeping every pane on every refresh would cost N extra round trips.
+      // Does this pane's agent advertise herdr-agent-stream/1? Resolve the pane
+      // ONCE and feed all four consumers from it — the stream capability, the
+      // transcript session, the advertised view, and the TUI flag.
+      //
+      // Each of those used to fetch the pane independently: four pane.get for
+      // one pane. That is invisible on a live pane and a storm on a dead one —
+      // a vanished id fast-fails all four within the same few milliseconds, and
+      // the client re-asks every 5s for as long as the card stays open (web/
+      // app.js: a setInterval on the selected pane). One stale pane produced
+      // 9,022 failed pane.get in a single 3.5h window on 2026-09-29. Resolving
+      // once makes a live pane four round trips cheaper, and lets a dead one
+      // say so instead of failing four more times.
       if (url.pathname === "/api/capability") {
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
-        const cap = await detectStream(paneId);
+
+        let pane: any = null;
+        let gone = false;
+        try {
+          pane = (await call("pane.get", { pane_id: paneId }))?.pane;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          // Name the pane in the log. Without this line an id is unrecoverable
+          // from disk — herdr's request log carries no params and the bridge log
+          // holds only its startup banner — which is why the 2026-09-29 storm
+          // had to be reconstructed from call-cluster arithmetic instead of read
+          // off a line. One line, and the next one names itself.
+          if (/pane_not_found|invalid_request/.test(msg)) {
+            gone = true;
+            console.warn(`[capability] pane gone: ${paneId} — ${msg}`);
+          } else {
+            console.warn(`[capability] pane.get failed for ${paneId}: ${msg}`);
+          }
+        }
+        // herdr ANSWERED: there is no such pane. Say so with a status the client
+        // can act on, rather than degrading into four more doomed lookups and a
+        // 200 that reads like a live pane which simply has no features. A
+        // transport error is deliberately NOT this: that falls through to the
+        // degraded response below and is retried on the next poll.
+        if (gone) {
+          return Response.json(
+            { error: "pane not found", pane_id: paneId, gone: true },
+            { status: 404 },
+          );
+        }
+
+        const tokens = (pane?.tokens ?? {}) as Record<string, string>;
+
+        const cap = detectStreamFromPane(pane);
         // No live socket? A claude pane still has a transcript on disk, which is
         // enough to render the conversation read-only. Chat then works for every
         // claude pane rather than only those wired for the protocol.
         let transcript: { path: string; session: string } | null = null;
         if (!cap) {
           try {
-            const sid = sessionIdFor((await call("pane.get", { pane_id: paneId }))?.pane);
+            const sid = sessionIdFor(pane);
             if (sid) {
               const path = await findTranscript(sid);
               if (path) transcript = { path, session: sid };
@@ -1344,7 +1429,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         // An agent advertises a view the same way it advertises a stream:
         // a pane metadata token. Same discovery path, same TTL semantics.
-        const resolved = await iframeForPane(paneId);
+        const resolved = await iframeFromTokens(paneId, tokens);
         const iframe: { url: string } | null = resolved.url ? { url: resolved.url } : null;
         const iframeRejected: string | null = resolved.rejected ?? null;
 
@@ -1361,7 +1446,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           // Claude Code pane draws a full TUI and has never set this token — so
           // this may suppress a hint, never enable behaviour that assumes a
           // blank terminal.
-          tui: !!(await paneTokens(paneId)).pane_tui,
+          tui: !!tokens.pane_tui,
           iframe, iframeRejected, iframePolicy: IFRAME_POLICY,
         });
       }

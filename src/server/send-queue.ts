@@ -141,7 +141,28 @@ export function say(
   return msg;
 }
 
-async function receptive(paneId: string): Promise<boolean> {
+/**
+ * Can this pane receive a queued message yet?
+ *
+ * Three answers, not two, and the third is why this is no longer a boolean.
+ * The old version caught every error and returned false, which made "herdr
+ * says this pane does not exist" indistinguishable from "herdr is briefly
+ * unreachable" — so a message queued to a pane that had since closed was
+ * polled every 1.5s for the full 10 minutes (~400 calls, all failing), then
+ * failed with "pane never became receptive": the wrong reason, and one that
+ * hid the real one.
+ *
+ * This loop was NOT the source of the large 2026-09-29 pane.get storm — that
+ * was /api/capability resolving one pane four times per request, at a ~5.5s
+ * cadence this loop's 1.5s cannot produce. But the pathology here is the same
+ * and its cost is bounded only by MAX_WAIT_MS.
+ */
+type Receptiveness =
+  | { verdict: "ready" }
+  | { verdict: "wait" }
+  | { verdict: "gone"; reason: string };
+
+async function receptive(paneId: string): Promise<Receptiveness> {
   try {
     const st = (await call("pane.get", { pane_id: paneId }))?.pane?.agent_status;
     // Deliberately NOT also requiring the agent to be the sole foreground
@@ -150,9 +171,20 @@ async function receptive(paneId: string): Promise<boolean> {
     // "done" means the agent finished its turn and is sitting at the prompt —
     // the single most receptive moment there is. Omitting it queued messages to
     // a settled pane forever, which looked like a broken send button.
-    return st === "idle" || st === "done" || st === "blocked" || st === "unknown";
-  } catch {
-    return false;
+    const ok = st === "idle" || st === "done" || st === "blocked" || st === "unknown";
+    return { verdict: ok ? "ready" : "wait" };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // herdr ANSWERED — it resolved the request and reported that this id cannot
+    // be looked up. That is a definitive empty-state, not a busy pane, and
+    // polling cannot change it. Nor is it safe to keep waiting: pane ids are
+    // positional (w5:p2), so if that id is ever re-registered it names a
+    // DIFFERENT pane and the message would be typed into a stranger's prompt.
+    // Fail now, with herdr's own words.
+    if (/pane_not_found|invalid_request/.test(msg)) return { verdict: "gone", reason: msg };
+    // A transport blip (socket closed, timeout, herdr restarting) says nothing
+    // about the pane itself. Keep waiting, exactly as before.
+    return { verdict: "wait" };
   }
 }
 
@@ -190,7 +222,16 @@ async function drain(paneId: string): Promise<void> {
 
       // Wait for the pane to be able to receive.
       const deadline = Date.now() + MAX_WAIT_MS;
-      while (!(await receptive(paneId))) {
+      for (;;) {
+        const r = await receptive(paneId);
+        if (r.verdict === "ready") break;
+        if (r.verdict === "gone") {
+          // No timeout to serve: the answer is already final, so report why.
+          next.state = "failed";
+          next.error = r.reason;
+          emit(next);
+          break;
+        }
         if (Date.now() > deadline) {
           next.state = "failed";
           next.error = "pane never became receptive";
