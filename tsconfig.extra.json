@@ -1,0 +1,4 @@
+{
+  "extends": "./tsconfig.json",
+  "include": ["plugin/**/*.ts", "tools/**/*.ts", "gen-tokens.ts"]
+}
