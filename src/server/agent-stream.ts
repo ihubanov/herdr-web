@@ -16,15 +16,16 @@ export interface StreamCapability {
   session?: string;
 }
 
-/** Reads a pane's advertised capability, or null. Never throws. */
-export async function detect(paneId: string): Promise<StreamCapability | null> {
-  let tokens: Record<string, string> | undefined;
-  try {
-    const res = await call("pane.get", { pane_id: paneId });
-    tokens = res?.pane?.tokens;
-  } catch {
-    return null;
-  }
+/**
+ * The capability a pane advertises, read from a pane record already in hand.
+ * Never throws.
+ *
+ * Split out from detect() because /api/capability resolves the pane once and
+ * feeds four consumers from it — going through detect() there would fetch the
+ * same pane a second time. Callers holding only an id want detect().
+ */
+export function detectFromPane(pane: any): StreamCapability | null {
+  const tokens = pane?.tokens as Record<string, string> | undefined;
   if (!tokens?.stream_proto || !tokens.stream_sock) return null;
 
   const proto = Number(tokens.stream_proto);
@@ -35,6 +36,15 @@ export async function detect(paneId: string): Promise<StreamCapability | null> {
 
   return { proto, sock: tokens.stream_sock, fmt: tokens.stream_fmt || "stream-json",
            session: tokens.stream_session };
+}
+
+/** Reads a pane's advertised capability by id, or null. Never throws. */
+export async function detect(paneId: string): Promise<StreamCapability | null> {
+  try {
+    return detectFromPane((await call("pane.get", { pane_id: paneId }))?.pane);
+  } catch {
+    return null;
+  }
 }
 
 /**
