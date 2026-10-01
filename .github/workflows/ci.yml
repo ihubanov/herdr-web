@@ -21,9 +21,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Blocking: the scope tsconfig.json actually covers today.
   typecheck:
-    name: typecheck (src)
+    name: typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,21 +36,8 @@ jobs:
       # The same command herdr's plugin [[build]] runs, so a lockfile that has
       # drifted from package.json fails here rather than in herdr.
       - run: bun install --frozen-lockfile
+      # Covers plugin/, tools/ and gen-tokens.ts as well as src/: those three
+      # groups were outside tsconfig.json's include, and an advisory job
+      # measured them clean, so they moved into the base config and the separate
+      # job (and tsconfig.extra.json) were retired.
       - run: bun run typecheck
-
-  # Advisory only: tsconfig.json includes `src/**/*.ts`, so plugin/, tools/ and
-  # gen-tokens.ts (9 tracked files) have never been typechecked. This job
-  # measures them without failing the build; promote it to blocking once the
-  # errors are cleared and they move into tsconfig.json.
-  typecheck-uncovered:
-    name: typecheck (plugin, tools, gen-tokens) [advisory]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: package.json
-      - run: bun install --frozen-lockfile
-      - run: bun run typecheck:extra

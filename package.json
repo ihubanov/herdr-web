@@ -9,7 +9,6 @@
     "dev": "bun --watch src/server/bridge.ts",
     "start": "bun src/server/bridge.ts",
     "typecheck": "tsc --noEmit",
-    "typecheck:extra": "tsc --noEmit -p tsconfig.extra.json",
     "sync-vendor": "cp node_modules/@xterm/xterm/lib/xterm.js src/web/xterm.js && cp node_modules/@xterm/xterm/css/xterm.css src/web/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.js src/web/xterm-addon-fit.js",
     "gen-tokens": "bun gen-tokens.ts"
   },

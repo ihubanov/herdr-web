@@ -95,6 +95,17 @@ let tuiChat = LS.get("tuiChat", null) ?? false;
 // straight there.
 const capCache = new Map();
 
+/**
+ * Pane ids the server has told us are gone, so the capability poll stops asking
+ * for them. Before this, a pane that closed while selected cost a pane.get every
+ * 5s for as long as the page stayed open.
+ *
+ * A tombstone is NOT permanent: herdr ids are positional ("w5:p2"), so the same
+ * id can be re-registered as a DIFFERENT pane. It is dropped as soon as the
+ * fleet lists that id again, or the pane is attached.
+ */
+const gonePanes = new Set();
+
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
@@ -222,6 +233,15 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
     c = await (await fetch(auth(`/api/capability?pane_id=${encodeURIComponent(paneId)}`))).json();
   } catch { return; }
   if (selected !== paneId) return;                // the user moved on mid-flight
+  // herdr RESOLVED the request and reported that this id cannot be looked up —
+  // a definitive answer, not a blip (the bridge answers 404 {gone:true}). Stop
+  // polling it and say so, rather than painting it as a live pane that merely
+  // has no features, which is what reading the 404 body as a capability did.
+  if (c?.gone) {
+    gonePanes.add(paneId);
+    el.tstatus.textContent = "pane is gone";
+    return;
+  }
   const before = capability?.iframe?.url ?? null;
   capability = c;
   capCache.set(paneId, c);
@@ -267,6 +287,7 @@ function attach(f, mode = "observe") {
   closeFrame();
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = f.pane_id;
+  gonePanes.delete(f.pane_id);                    // attaching proves it is alive
   activeMode = mode;
   // Adopt the cached capability BEFORE switching views — setView paints the
   // button from `capability`, and a stale value flashes the previous pane's
@@ -331,6 +352,9 @@ function attach(f, mode = "observe") {
       el.tstatus.textContent = "read-only — just start typing to take control";
     } else if (m.type === "_closed") {
       el.tstatus.textContent = `closed: ${m.reason}`;
+      // The pane is gone, so stop the capability poll for it too — otherwise it
+      // keeps asking until the next fleet refresh happens to notice.
+      if (selected) gonePanes.add(selected);
     }
   };
   ws.onclose = (e) => { if (e?.code === 4001) return sessionEnded(e.reason); renderCtl(); };
@@ -1527,7 +1551,17 @@ setInterval(() => {
 // no event for a metadata token changing, and the tokens carry a TTL and are
 // refreshed, so an event per change would be noise anyway. 5s is well inside the
 // 5-minute TTL and costs one small local request.
-setInterval(() => { if (selected) void refreshCapability(selected); }, 5000);
+setInterval(() => {
+  if (!selected) return;
+  // Skip a pane the server has reported gone — but only while the fleet still
+  // agrees it is absent. Ids are positional, so "w5:p2" reappearing in the fleet
+  // means a DIFFERENT pane now holds that id, and the tombstone must not hide it.
+  if (gonePanes.has(selected)) {
+    if (!fleet.some((f) => f.pane_id === selected)) return;
+    gonePanes.delete(selected);
+  }
+  void refreshCapability(selected);
+}, 5000);
 
 // ------------------------------------------------------------------ alerting
 let audioCtx = null;
