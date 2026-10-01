@@ -8,7 +8,15 @@
     "skipLibCheck": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
+    "allowJs": true,
     "lib": ["ESNext", "DOM"]
   },
-  "include": ["src/**/*.ts", "plugin/**/*.ts", "tools/**/*.ts", "gen-tokens.ts"]
+  "include": [
+    "src/**/*.ts",
+    "plugin/**/*.ts",
+    "tools/**/*.ts",
+    "test/**/*.ts",
+    "gen-tokens.ts",
+    "src/web/pane-poll.js"
+  ]
 }

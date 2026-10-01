@@ -1,6 +1,8 @@
 // herdr web client. Layout mirrors the TUI: collapsible spaces/agents on the
 // left, terminal as the main surface. The fleet grid is an overlay view you
 // toggle to, and what you see before picking an agent.
+import { createGonePanes } from "./pane-poll.js";
+
 const { Terminal } = window;
 const FitAddon = window.FitAddon?.FitAddon || window.FitAddon;
 
@@ -95,16 +97,10 @@ let tuiChat = LS.get("tuiChat", null) ?? false;
 // straight there.
 const capCache = new Map();
 
-/**
- * Pane ids the server has told us are gone, so the capability poll stops asking
- * for them. Before this, a pane that closed while selected cost a pane.get every
- * 5s for as long as the page stayed open.
- *
- * A tombstone is NOT permanent: herdr ids are positional ("w5:p2"), so the same
- * id can be re-registered as a DIFFERENT pane. It is dropped as soon as the
- * fleet lists that id again, or the pane is attached.
- */
-const gonePanes = new Set();
+// Panes the server has reported gone, so the capability poll stops asking about
+// them. The revive rule (an id the fleet lists again may be a DIFFERENT pane) is
+// in pane-poll.js, which is unit-tested; this file is not reachable from a test.
+const gonePanes = createGonePanes();
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
@@ -238,7 +234,7 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
   // polling it and say so, rather than painting it as a live pane that merely
   // has no features, which is what reading the 404 body as a capability did.
   if (c?.gone) {
-    gonePanes.add(paneId);
+    gonePanes.mark(paneId);
     el.tstatus.textContent = "pane is gone";
     return;
   }
@@ -287,7 +283,7 @@ function attach(f, mode = "observe") {
   closeFrame();
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = f.pane_id;
-  gonePanes.delete(f.pane_id);                    // attaching proves it is alive
+  gonePanes.clear(f.pane_id);                    // attaching proves it is alive
   activeMode = mode;
   // Adopt the cached capability BEFORE switching views — setView paints the
   // button from `capability`, and a stale value flashes the previous pane's
@@ -354,7 +350,7 @@ function attach(f, mode = "observe") {
       el.tstatus.textContent = `closed: ${m.reason}`;
       // The pane is gone, so stop the capability poll for it too — otherwise it
       // keeps asking until the next fleet refresh happens to notice.
-      if (selected) gonePanes.add(selected);
+      gonePanes.mark(selected);
     }
   };
   ws.onclose = (e) => { if (e?.code === 4001) return sessionEnded(e.reason); renderCtl(); };
@@ -1552,14 +1548,9 @@ setInterval(() => {
 // refreshed, so an event per change would be noise anyway. 5s is well inside the
 // 5-minute TTL and costs one small local request.
 setInterval(() => {
-  if (!selected) return;
-  // Skip a pane the server has reported gone — but only while the fleet still
-  // agrees it is absent. Ids are positional, so "w5:p2" reappearing in the fleet
-  // means a DIFFERENT pane now holds that id, and the tombstone must not hide it.
-  if (gonePanes.has(selected)) {
-    if (!fleet.some((f) => f.pane_id === selected)) return;
-    gonePanes.delete(selected);
-  }
+  // The revive rule (a reappearing id is a different pane) lives in pane-poll.js,
+  // where it is unit-tested, instead of being spelled out again here.
+  if (!gonePanes.shouldPoll(selected, fleet)) return;
   void refreshCapability(selected);
 }, 5000);
 

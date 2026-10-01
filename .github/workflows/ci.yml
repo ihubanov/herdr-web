@@ -1,8 +1,8 @@
-# Typecheck on every push and PR.
+# Typecheck and test on every push and PR.
 #
 # The point is to keep compilation off a development laptop: this repo has no
 # build step of its own (herdr runs `bun install --frozen-lockfile` at plugin
-# install time), so "CI" here means install + typecheck and nothing more.
+# install time), so "CI" here means install + typecheck + test and nothing more.
 #
 # It runs on push for ALL branches, not just main, so a feature branch is
 # checked the moment it is pushed, before a PR exists.
@@ -21,9 +21,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  typecheck:
-    name: typecheck
-    runs-on: ubuntu-latest
+  check:
+    name: check
+    # Pinned, not `ubuntu-latest`: the label migrates to Ubuntu 26 on
+    # 2026-10-19, and the environment changing silently under a gate is the same
+    # failure shape as the bugs this workflow was added to catch. Bump it
+    # deliberately, in a commit.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -36,8 +40,14 @@ jobs:
       # The same command herdr's plugin [[build]] runs, so a lockfile that has
       # drifted from package.json fails here rather than in herdr.
       - run: bun install --frozen-lockfile
-      # Covers plugin/, tools/ and gen-tokens.ts as well as src/: those three
-      # groups were outside tsconfig.json's include, and an advisory job
-      # measured them clean, so they moved into the base config and the separate
-      # job (and tsconfig.extra.json) were retired.
+      # Covers plugin/, tools/, test/ and gen-tokens.ts as well as src/: those
+      # groups were outside tsconfig.json's include, and an advisory job measured
+      # them clean, so they moved into the base config and the separate job (and
+      # tsconfig.extra.json) were retired.
       - run: bun run typecheck
+      # Bun's runner is built in, so this needs no dependency of its own. It
+      # exists because src/web/app.js is plain JavaScript that tsc never sees —
+      # the one part of the client that could regress silently. The rule that got
+      # it wrong was extracted to src/web/pane-poll.js precisely so it is
+      # reachable from here.
+      - run: bun run test
