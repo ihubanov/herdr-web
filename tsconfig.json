@@ -10,5 +10,5 @@
     "allowImportingTsExtensions": true,
     "lib": ["ESNext", "DOM"]
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "plugin/**/*.ts", "tools/**/*.ts", "gen-tokens.ts"]
 }
