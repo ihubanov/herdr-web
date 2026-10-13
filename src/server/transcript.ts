@@ -40,8 +40,13 @@ export const TRANSCRIPT_ROOTS: string[] = (() => {
   if (explicit) return explicit.split(":").filter(Boolean).map((d) => join(d, "projects"));
   const dirs = [
     process.env.CLAUDE_CONFIG_DIR,
+    process.env.JACK_CONFIG_DIR,
     join(homedir(), ".claude"),
     join(homedir(), ".claude-local"),
+    // Jack moved its config home off .claude-local to ~/.jack, so a Jack pane's
+    // history lives here and nowhere else. Without this root the pane shows a
+    // title and an empty transcript — the same silent shape described above.
+    join(homedir(), ".jack"),
   ].filter(Boolean) as string[];
   return [...new Set(dirs)].map((d) => join(d, "projects"));
 })();
