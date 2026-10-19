@@ -25,6 +25,11 @@ DISPLAY_N=99; WS_PORT=6099; GEOM="1600x1000x24"; LAUNCH_BROWSER=1; STOP=0
 # address bar and bookmarks spend scarce pixels on chrome the viewer cannot
 # usefully act on. --no-kiosk restores them when you do want to navigate by hand.
 KIOSK=1; START_URL="about:blank"
+# --lock-to HOST:PORT: the browser may reach that one origin and nothing else. Every other
+# request goes to a proxy that is not listening, so it fails. "<-loopback>" matters: Chrome
+# otherwise bypasses the proxy for every localhost address, which would leave all local
+# services reachable. Used by herdr-web's "brain" display (the SAGE dashboard).
+LOCK_TO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --display) DISPLAY_N="$2"; shift 2;;
@@ -33,6 +38,7 @@ while [ $# -gt 0 ]; do
     --no-browser) LAUNCH_BROWSER=0; shift;;
     --no-kiosk)   KIOSK=0; shift;;
     --url)        START_URL="$2"; shift 2;;
+    --lock-to)    LOCK_TO="$2"; shift 2;;
     --stop) STOP=1; shift;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -215,6 +221,8 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
       # On a desktop leave it unset.
       KIOSK_ARGS=""
       [ "$KIOSK" = 1 ] && KIOSK_ARGS="--kiosk"
+      LOCK_ARGS=""
+      [ -n "$LOCK_TO" ] && LOCK_ARGS="--proxy-server=127.0.0.1:9 --proxy-bypass-list=<-loopback>;${LOCK_TO}"
       # -u XDG_SESSION_TYPE is as important as -u WAYLAND_DISPLAY and was the
       # missing half: with it still set to "wayland", Chrome's ozone auto-detect
       # picks the Wayland backend, ignores DISPLAY entirely, and the window opens
@@ -224,7 +232,7 @@ if [ "$LAUNCH_BROWSER" = 1 ]; then
         --user-data-dir="${XDG_RUNTIME_DIR:-/tmp}/shared-browser-${DISPLAY_N}" \
         --no-first-run --no-default-browser-check \
         --disable-session-crashed-bubble --disable-infobars \
-        $KIOSK_ARGS ${HERDR_SHARE_BROWSER_ARGS:-} --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
+        $KIOSK_ARGS $LOCK_ARGS ${HERDR_SHARE_BROWSER_ARGS:-} --window-position=0,0 --window-size="${SCREEN_W},${SCREEN_H}" \
         --remote-debugging-port=$((9300 + DISPLAY_N)) \
         "$START_URL" >/dev/null 2>&1 &
       note_pid $!
