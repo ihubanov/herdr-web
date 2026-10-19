@@ -1593,6 +1593,13 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           // No HERDR_PANE_ID: that is what keeps the script from advertising this display on
           // the pane (it would replace the pane's own "view") and from starting a CDP gate.
           const { HERDR_PANE_ID: _drop, ...brainEnv } = env;
+          // The dashboard's brain graph is WebGL. A headless box (llvmpipe, no GPU) cannot give
+          // Chrome a context, and the page shows "Memory view temporarily unavailable". Software
+          // GL fixes it. "unsafe" swiftshader is acceptable HERE only: this browser can reach
+          // nothing but the dashboard, unlike a pane's shared browser.
+          brainEnv.HERDR_SHARE_BROWSER_ARGS = [brainEnv.HERDR_SHARE_BROWSER_ARGS,
+            "--use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist"]
+            .filter(Boolean).join(" ");
           const lockTo = new URL(BRAIN_URL).host;
           const args = action === "brain-stop"
             ? ["--stop", "--display", String(BRAIN_N), "--port", String(BRAIN_WS)]
