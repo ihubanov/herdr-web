@@ -304,6 +304,18 @@ async function typedAttrFmtFor(paneId: string): Promise<AttrFmt> {
 const UPLOAD_DIR = process.env.HERDR_WEB_UPLOAD_DIR
   || join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "herdr-web", "uploads");
 const UPLOAD_MAX = Number(process.env.HERDR_WEB_UPLOAD_MAX_BYTES || 25 * 1024 * 1024);
+/**
+ * The "brain" display: the SAGE dashboard, in a browser of its own. It is NOT a pane's shared
+ * browser — its own X display, profile and ports, never advertised on a pane, no CDP gate
+ * (nothing drives it but the viewer) — and the browser is locked to the dashboard: kiosk mode,
+ * and every request except the dashboard's origin goes to a dead proxy (shared-browser.sh
+ * --lock-to). The browser runs on THIS host, so loopback is the SAGE node on this host.
+ */
+const BRAIN_URL = process.env.HERDR_WEB_BRAIN_URL || "http://127.0.0.1:8099/ui/";
+const BRAIN_ID = "~brain";                        // a path key no herdr pane id can take
+const BRAIN_N = 49;                               // below the pane range (50..89)
+const BRAIN_WS = 6900 + BRAIN_N;
+let brainView: string | null = null;              // the iframe path of the running display
 const IFRAME_POLICY: IframePolicy = (() => {
   const v = (process.env.HERDR_WEB_IFRAMES || "off").trim().toLowerCase();
   return v === "on" || v === "loopback" ? v : "off";
@@ -538,6 +550,7 @@ function keepAdvertised(paneId: string, url: string): void {
 }
 
 async function sharedTarget(paneId: string): Promise<URL | null> {
+  if (paneId === BRAIN_ID) return new URL(`http://127.0.0.1:${BRAIN_WS}/shared.html`);
   try {
     const tokens = (await call("pane.get", { pane_id: paneId }))?.pane?.tokens ?? {};
     const raw = String(tokens.iframe_url ?? "").trim();
@@ -1570,6 +1583,51 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           || join(process.env.HOME ?? "", ".local", "bin", "herdr");
         const env = { ...process.env, HERDR_PANE_ID: paneId, HERDR_BIN_PATH: herdrBin };
 
+        if (action === "brain" || action === "brain-stop") {
+          const script = join(tools, "shared-browser.sh");
+          if (action === "brain") {
+            const up = brainView !== null && await fetch(`http://127.0.0.1:${BRAIN_WS}/shared.html`,
+              { signal: AbortSignal.timeout(1500) }).then((r) => r.ok).catch(() => false);
+            if (up) return Response.json({ ok: true, iframe_url: brainView, reused: true });
+          }
+          // No HERDR_PANE_ID: that is what keeps the script from advertising this display on
+          // the pane (it would replace the pane's own "view") and from starting a CDP gate.
+          const { HERDR_PANE_ID: _drop, ...brainEnv } = env;
+          const lockTo = new URL(BRAIN_URL).host;
+          const args = action === "brain-stop"
+            ? ["--stop", "--display", String(BRAIN_N), "--port", String(BRAIN_WS)]
+            : ["--display", String(BRAIN_N), "--port", String(BRAIN_WS),
+               "--url", BRAIN_URL, "--lock-to", lockTo];
+          const logPath = join(process.env.XDG_RUNTIME_DIR || "/tmp", `herdr-brain-${Date.now()}.log`);
+          try {
+            const proc = Bun.spawn([script, ...args], {
+              env: brainEnv, stdin: "ignore",
+              stdout: Bun.file(logPath), stderr: Bun.file(logPath),
+            });
+            const timedOut = Symbol("timeout");
+            const code = await Promise.race([
+              proc.exited,
+              new Promise((r) => setTimeout(() => r(timedOut), 45_000)),
+            ]);
+            if (code === timedOut) {
+              proc.kill();
+              return Response.json({ error: "shared-browser.sh did not finish in 45s" }, { status: 504 });
+            }
+            let out = "";
+            try { out = readFileSync(logPath, "utf8"); } catch { /* nothing written */ }
+            try { unlinkSync(logPath); } catch { /* already gone */ }
+            if (code !== 0) {
+              return Response.json({ error: out.trim().slice(0, 400) || `exit ${code}` }, { status: 500 });
+            }
+            if (action === "brain-stop") { brainView = null; return Response.json({ ok: true }); }
+            const resize = out.match(/shared\.html\?resize=(\w+)/)?.[1] ?? "scale";
+            brainView = `/shared/${encodeURIComponent(BRAIN_ID)}/?resize=${resize}`;
+            return Response.json({ ok: true, iframe_url: brainView });
+          } catch (e: any) {
+            return Response.json({ error: e?.message ?? "spawn failed" }, { status: 500 });
+          }
+        }
+
         if (action === "url") {
           const raw = String(b?.url ?? "").trim();
           if (!raw) return Response.json({ error: "url required" }, { status: 400 });
@@ -1650,7 +1708,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           }
         }
 
-        return Response.json({ error: "action must be url|browser|stop" }, { status: 400 });
+        return Response.json({ error: "action must be url|browser|stop|brain|brain-stop" }, { status: 400 });
       }
 
       if (url.pathname === "/api/presence") {

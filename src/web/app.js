@@ -21,7 +21,7 @@ const el = {
   cclip: $("cclip"), cfile: $("cfile"), attachbar: $("attachbar"), dropveil: $("dropveil"),
   lockstate: $("lockstate"), locktake: $("locktake"), lockrelease: $("lockrelease"),
   frameclose: $("frameclose"),
-  frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"),
+  frameview: $("frameview"), frame: $("frame"), framebtn: $("framebtn"), brainbtn: $("brainbtn"),
   framebar: $("framebar"), framemax: $("framemax"), framestop: $("framestop"),
   chatask: $("chatask"), chataskq: $("chataskq"), chatpresets: $("chatpresets"),
   frameurl: $("frameurl"), framewho: $("framewho"), frameopen: $("frameopen"),
@@ -256,14 +256,15 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
   // happened to advertise something: with nothing advertised it STARTS a shared
   // browser, which is how a user gets one without asking an agent to.
   el.framebtn.style.display = "inline-block";
+  el.brainbtn.style.display = "inline-block";
   el.framebtn.title = c?.iframe
     ? `Embedded view: ${c.iframe.url}`
     : "Open a shared browser window on this pane";
 
   const now = c?.iframe?.url ?? null;
   if (!firstLook && now !== before) {
-    if (now && frameOpen) openFrame(now);         // the agent replaced what it shows
-    else if (!now && frameOpen) dismissFrame();   // …or withdrew it
+    if (now && frameOpen && !brainOpen) openFrame(now);         // the agent replaced what it shows
+    else if (!now && frameOpen && !brainOpen) dismissFrame();   // …or withdrew it
     else if (now) el.tstatus.textContent = "a view is being offered — open it with the view button";
   }
 
@@ -363,6 +364,7 @@ function detach() {
   capability = null;
   el.chatbtn.style.display = "none";
   el.framebtn.style.display = "none";
+  el.brainbtn.style.display = "none";
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = null; activeMode = "observe";
   el.ctl.classList.remove("on");
@@ -498,7 +500,7 @@ window.matchMedia(NARROW).addEventListener("change", (m) => {
 });
 el.fleetbtn.onclick = toggleView;
 el.framebtn.onclick = () => {
-  if (frameOpen) { dismissFrame(); return; }
+  if (frameOpen && !brainOpen) { dismissFrame(); return; }
   // An agent-advertised URL is the fast path. With nothing advertised the button
   // still works: it asks for a shared browser, which is the whole reason a user
   // wants this without an agent having thought of it first.
@@ -543,13 +545,38 @@ async function startSharedBrowser() {
 /** Whether the floating window is up. Declared here, above every function that
  *  reads it: detach() runs during startup and would otherwise hit its TDZ. */
 let frameOpen = false;
+/** Whether that window is showing the brain display rather than a pane's view. */
+let brainOpen = false;
+
+// "brain": the SAGE dashboard in its own browser, separate from every pane's "view" display and
+// locked to the dashboard (see BRAIN_URL in bridge.ts). Pressing it again closes it.
+el.brainbtn.onclick = async () => {
+  if (brainOpen) { dismissFrame(); return; }
+  const b = el.brainbtn, prev = b.textContent;
+  b.disabled = true; b.textContent = "…";
+  el.tstatus.textContent = "opening the SAGE dashboard…";
+  try {
+    const r = await fetch(auth("/api/share"), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pane_id: selected || "-", action: "brain" }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.iframe_url) { el.tstatus.textContent = `brain failed: ${d.error || r.statusText}`; return; }
+    el.tstatus.textContent = "SAGE dashboard open";
+    openFrame(d.iframe_url, { brain: true });
+  } catch (e) {
+    el.tstatus.textContent = `brain failed: ${e?.message ?? e}`;
+  } finally {
+    b.disabled = false; b.textContent = prev;
+  }
+};
 
 /**
  * Show an agent-advertised URL. The frame is sandboxed and must be a different
  * origin than this page — the bridge enforces that, since `allow-same-origin`
  * on a same-origin frame would let it drop its own sandbox and read our token.
  */
-function openFrame(url) {
+function openFrame(url, { brain = false } = {}) {
   const ours = url.startsWith("/shared/");
   // The sandbox depends on WHOSE page this is, which is the distinction the old
   // blanket attribute could not make.
@@ -569,22 +596,35 @@ function openFrame(url) {
   el.frame.src = ours ? auth(url) : url;
   el.frameurl.textContent = url;
   const f = entry(selected);
-  el.framewho.textContent = f ? `from ${f.title}` : "";
+  el.framewho.textContent = brain ? "SAGE dashboard" : f ? `from ${f.title}` : "";
   // Only a display proxied through us can be shut down from here; an
   // agent-advertised third-party page is not ours to stop.
   el.framestop.style.display = ours ? "" : "none";
   frameOpen = true;
+  brainOpen = brain;
   restoreGeom();
   el.frameview.classList.add("on");
-  el.framebtn.classList.add("on");
-  startLockWatch(selected);
+  (brain ? el.brainbtn : el.framebtn).classList.add("on");
+  (brain ? el.framebtn : el.brainbtn).classList.remove("on");
+  if (brain) {
+    // Nothing but the viewer drives this display, so input is simply theirs: no pane lock.
+    stopLockWatch();
+    lockState = { owner: "user" };
+    renderLock();
+    el.locktake.style.display = "none";
+    el.lockrelease.style.display = "none";
+  } else {
+    startLockWatch(selected);
+  }
 }
 function closeFrame() {
   el.frame.src = "about:blank";
   el.frameurl.textContent = "";
   frameOpen = false;
+  brainOpen = false;
   el.frameview.classList.remove("on");
   el.framebtn.classList.remove("on");
+  el.brainbtn.classList.remove("on");
   stopLockWatch();
 }
 
@@ -602,13 +642,13 @@ el.frameclose.onclick = dismissFrame;
 // view of it. Kept as a separate button because an agent may still be working on
 // that display, and closing a window must never kill work.
 el.framestop.onclick = async () => {
-  if (!selected) return;
+  if (!selected && !brainOpen) return;
   const b = el.framestop, prev = b.textContent;
   b.disabled = true; b.textContent = "stopping…";
   try {
     const r = await fetch(auth("/api/share"), {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ pane_id: selected, action: "stop" }),
+      body: JSON.stringify({ pane_id: selected || "-", action: brainOpen ? "brain-stop" : "stop" }),
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) { el.tstatus.textContent = `stop failed: ${d.error || r.statusText}`; return; }
