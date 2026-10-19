@@ -316,6 +316,35 @@ const BRAIN_ID = "~brain";                        // a path key no herdr pane id
 const BRAIN_N = 49;                               // below the pane range (50..89)
 const BRAIN_WS = 6900 + BRAIN_N;
 let brainView: string | null = null;              // the iframe path of the running display
+/**
+ * The brain browser is not cheap: the graph is WebGL drawn in software (no GPU), measured at
+ * 4.5-6.6 cores on jack — and it burns that whether or not anyone is looking. So it runs only
+ * while watched: when the last viewer's socket closes (or nobody connects after a start), it is
+ * stopped after BRAIN_IDLE_MS, and the brain button starts it again. Freezing the page instead
+ * was tried: it stops the cost, but a frozen page never resumes rendering in place.
+ * HERDR_WEB_BRAIN_IDLE_SECONDS=0 keeps it running.
+ */
+const BRAIN_IDLE_MS = Math.max(0, Number(process.env.HERDR_WEB_BRAIN_IDLE_SECONDS ?? 60)) * 1000;
+let brainViewers = 0;
+let brainIdleTimer: ReturnType<typeof setTimeout> | null = null;
+let brainStopping: Promise<unknown> | null = null;
+function brainScript(): string {
+  return join(dirname(new URL(import.meta.url).pathname), "..", "..", "tools", "shared-browser.sh");
+}
+function armBrainIdle(): void {
+  if (brainIdleTimer) { clearTimeout(brainIdleTimer); brainIdleTimer = null; }
+  if (!BRAIN_IDLE_MS || brainViewers > 0 || brainView === null) return;
+  brainIdleTimer = setTimeout(() => {
+    brainIdleTimer = null;
+    if (brainViewers > 0 || brainView === null) return;
+    brainView = null;
+    const { HERDR_PANE_ID: _drop, ...env } = process.env;
+    const proc = Bun.spawn([brainScript(), "--stop", "--display", String(BRAIN_N), "--port", String(BRAIN_WS)],
+      { env, stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+    console.log("[brain] no viewers, display stopped");
+    brainStopping = proc.exited.finally(() => { brainStopping = null; });
+  }, BRAIN_IDLE_MS);
+}
 const IFRAME_POLICY: IframePolicy = (() => {
   const v = (process.env.HERDR_WEB_IFRAMES || "off").trim().toLowerCase();
   return v === "on" || v === "loopback" ? v : "off";
@@ -925,6 +954,7 @@ const server = Bun.serve<WsData>({
       }
 
       if (d.kind === "novnc" && d.wsTarget) {
+        if (d.paneId === BRAIN_ID) { brainViewers++; armBrainIdle(); }
         // RFB is binary and starts talking immediately, so anything the viewer
         // sends before the upstream is ready must be held, not dropped — losing
         // a handshake byte wedges the session with no error anywhere.
@@ -1067,6 +1097,10 @@ const server = Bun.serve<WsData>({
       ws.data.stream?.close();
       ws.data.tail?.close();
       if (ws.data.up) { try { ws.data.up.close(); } catch {} }
+      if (ws.data.kind === "novnc" && ws.data.paneId === BRAIN_ID) {
+        brainViewers = Math.max(0, brainViewers - 1);
+        armBrainIdle();
+      }
       ws.data.unsub?.();
       // Leave the shared session. The LAST viewer out closes it — a session
       // left holding a pane nobody is watching would block herdr's own TUI from
@@ -1585,6 +1619,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         if (action === "brain" || action === "brain-stop") {
           const script = join(tools, "shared-browser.sh");
+          if (brainStopping) await brainStopping;
           if (action === "brain") {
             const up = brainView !== null && await fetch(`http://127.0.0.1:${BRAIN_WS}/shared.html`,
               { signal: AbortSignal.timeout(1500) }).then((r) => r.ok).catch(() => false);
@@ -1627,9 +1662,10 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
             if (code !== 0) {
               return Response.json({ error: out.trim().slice(0, 400) || `exit ${code}` }, { status: 500 });
             }
-            if (action === "brain-stop") { brainView = null; return Response.json({ ok: true }); }
+            if (action === "brain-stop") { brainView = null; armBrainIdle(); return Response.json({ ok: true }); }
             const resize = out.match(/shared\.html\?resize=(\w+)/)?.[1] ?? "scale";
             brainView = `/shared/${encodeURIComponent(BRAIN_ID)}/?resize=${resize}`;
+            armBrainIdle();  // a start nobody connects to must not run forever either
             return Response.json({ ok: true, iframe_url: brainView });
           } catch (e: any) {
             return Response.json({ error: e?.message ?? "spawn failed" }, { status: 500 });
