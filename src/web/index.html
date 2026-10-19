@@ -232,6 +232,23 @@
   #frameclose{font-size:15px !important;line-height:1;padding:1px 8px !important}
   #frame{flex:1;min-height:0;width:100%;border:0;background:#fff}
 
+  /* ---------- brain view ----------
+     The SAGE dashboard as a page of its own: it covers everything under the
+     header rather than floating over one pane, since it belongs to no pane. */
+  #brainbtn{display:inline-flex;align-items:center;gap:5px}
+  #brainbtn svg{width:16px;height:16px;flex:none}
+  #brainview{display:none;position:fixed;z-index:70;top:44px;left:0;right:0;bottom:0;
+    flex-direction:column;background:var(--bg)}
+  #brainview.on{display:flex}
+  #brainbar{display:flex;align-items:center;gap:10px;padding:4px 11px;flex:none;
+    background:var(--panel);border-bottom:1px solid var(--line);font-size:11.5px;color:var(--dim)}
+  #brainbar .lbl{font-weight:700;text-transform:uppercase;letter-spacing:.07em;font-size:10px;flex:1}
+  #brainbar button{background:transparent;border:1px solid var(--line);color:var(--dim);
+    border-radius:5px;padding:2px 9px;font:inherit;font-size:11px;cursor:pointer;flex:none}
+  #brainbar button:hover{color:var(--fg);border-color:var(--idle)}
+  #brainclose{font-size:15px !important;line-height:1;padding:1px 8px !important}
+  #brainframe{flex:1;min-height:0;width:100%;border:0;background:#000}
+
   /* ---------- structured chat view ----------
      Styled to sit next to the terminal, not to look like a chat app: monospace,
      tight leading, no rounded cards. A speaker badge appears only when the
@@ -543,6 +560,13 @@
     <button class="icon" id="triage" title="Triage — blocked only (t)">⚡</button>
     <button class="icon" id="sound" title="Sound on blocked (s)">🔔</button>
     <button class="icon" id="help" title="Shortcuts (?)">?</button>
+    <button class="icon" id="brainbtn" title="SAGE dashboard: its own browser, locked to it">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 5a3 3 0 0 0-5.6-1.5A3 3 0 0 0 3.5 8a3.5 3.5 0 0 0 .4 6.2A3.5 3.5 0 0 0 8 19.5a3 3 0 0 0 4 .5z"/>
+        <path d="M12 5a3 3 0 0 1 5.6-1.5A3 3 0 0 1 20.5 8a3.5 3.5 0 0 1-.4 6.2A3.5 3.5 0 0 1 16 19.5a3 3 0 0 1-4 .5z"/>
+        <path d="M12 5v15M8 9.5a2.5 2.5 0 0 1 2.5 2.5M16 9.5a2.5 2.5 0 0 0-2.5 2.5M7 15h2M15 15h2"/>
+      </svg>brain</button>
     <a id="altui" class="icon" hidden rel="noopener" title="Switch to the other interface"></a>
     <span id="me" title="signed in as"></span>
     <div id="conn" class="down">connecting</div>
@@ -567,7 +591,6 @@
       <span id="ctlmode" title="Control is taken automatically when you type">read-only</span>
       <button id="chatbtn" style="display:none">chat view</button>
       <button id="framebtn" style="display:none">view</button>
-      <button id="brainbtn" style="display:none" title="The SAGE dashboard, in its own browser locked to it">brain</button>
       <button id="detach">detach</button>
     </div>
     <div id="askctx"><div class="q" id="askq"></div><div id="presetrow"></div></div>
@@ -623,6 +646,17 @@
     <div id="statusbar"><span id="roster"></span><span id="chatq"></span></div>
     <div id="fleet"></div>
   </main>
+
+  <div id="brainview">
+    <div id="brainbar">
+      <span class="lbl">SAGE dashboard</span>
+      <button id="brainstop" title="Shut the dashboard's browser down — closing only hides it">stop</button>
+      <button id="brainclose" title="Close">&times;</button>
+    </div>
+    <!-- allow-same-origin: this is our own proxied noVNC shim (see openFrame in app.js). -->
+    <iframe id="brainframe" sandbox="allow-scripts allow-forms allow-same-origin"
+            referrerpolicy="no-referrer" allow="clipboard-read; clipboard-write"></iframe>
+  </div>
 
   <div id="modal"><div class="box">
     <h3 id="mtitle">…</h3>
