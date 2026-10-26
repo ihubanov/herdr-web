@@ -620,6 +620,47 @@ el.framestop.onclick = async () => {
     b.disabled = false; b.textContent = prev;
   }
 };
+// "brain": the SAGE dashboard in its own browser, separate from every pane's "view" display and
+// locked to the dashboard (see BRAIN_URL in bridge.ts). It is a page-level view, not a pane's
+// window: it covers everything under the header. Pressing the button again closes it.
+const brainbtn = $("brainbtn"), brainview = $("brainview"), brainframe = $("brainframe");
+function closeBrain() {
+  brainframe.src = "about:blank";
+  brainview.classList.remove("on");
+  brainbtn.classList.remove("on");
+}
+brainbtn.onclick = async () => {
+  if (brainview.classList.contains("on")) { closeBrain(); return; }
+  brainbtn.disabled = true;
+  try {
+    const r = await fetch(auth("/api/share"), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pane_id: selected || "-", action: "brain" }),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || !d.iframe_url) { el.tstatus.textContent = `brain failed: ${d.error || r.statusText}`; return; }
+    brainframe.src = auth(d.iframe_url);
+    brainview.classList.add("on");
+    brainbtn.classList.add("on");
+  } catch (e) {
+    el.tstatus.textContent = `brain failed: ${e?.message ?? e}`;
+  } finally {
+    brainbtn.disabled = false;
+  }
+};
+$("brainclose").onclick = closeBrain;
+$("brainstop").onclick = async () => {
+  const b = $("brainstop");
+  b.disabled = true;
+  try {
+    await fetch(auth("/api/share"), {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pane_id: selected || "-", action: "brain-stop" }),
+    });
+  } catch {}
+  b.disabled = false;
+  closeBrain();
+};
 document.addEventListener("keydown", (e) => {
   // Escape closes the window only while it has focus. A floating window must not
   // swallow Escape from the terminal behind it — that key is the agent's.
