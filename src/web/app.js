@@ -14,6 +14,7 @@ const $ = (id) => document.getElementById(id);
 // After load the host drives the view over postMessage instead (embedMessage).
 const EMBED = readEmbed(location.search);
 if (EMBED.embed) document.body.classList.add("embed");
+if (!EMBED.controls) document.body.classList.add("embed-noctl");
 let embedWanted = EMBED.pane;
 let embedAttached = false;
 /** Tell the host shell something. Same origin only, like the messages it sends in. */
@@ -101,6 +102,8 @@ let capability = null;            // structured-stream capability of the open pa
 // terminal sticks, so someone who prefers the raw pane isn't fighting the app
 // on every open. Panes with no stream ignore this entirely.
 let preferChat = LS.get("preferChat", null) ?? true;
+// An embed host's ?view= beats the stored choice: its users never see the toggle that set it.
+if (EMBED.view) preferChat = EMBED.view === "chat";
 /** Chat chosen explicitly ON a pane that draws its own TUI. Separate from
  *  preferChat: terminal is the default for those, and this is the opt-out. */
 let tuiChat = LS.get("tuiChat", null) ?? false;
@@ -1689,7 +1692,7 @@ async function loadMe() {
     }
     // Default pane view comes from the server (HERDR_WEB_DEFAULT_VIEW) until this person has
     // clicked the toggle themselves; an explicit choice is stored and wins thereafter.
-    if (LS.get("preferChat", null) === null) preferChat = me.defaultView !== "terminal";
+    if (!EMBED.view && LS.get("preferChat", null) === null) preferChat = me.defaultView !== "terminal";
     el.me.textContent = me.multiuser ? me.label : "";
     updateTitle();
     el.me.title = me.multiuser

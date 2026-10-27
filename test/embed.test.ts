@@ -5,7 +5,7 @@ import { pickEmbedPane, readEmbed, readEmbedMessage } from "../src/web/embed.js"
 
 describe("readEmbed", () => {
   test("off when absent", () => {
-    expect(readEmbed("?token=x")).toEqual({ embed: false, pane: null, brain: false });
+    expect(readEmbed("?token=x")).toEqual({ embed: false, pane: null, brain: false, view: null, controls: true });
   });
   test("on for 1, true and a bare flag", () => {
     for (const s of ["?embed=1", "?embed=true", "?embed", "embed=1"]) expect(readEmbed(s).embed).toBe(true);
@@ -14,13 +14,29 @@ describe("readEmbed", () => {
     expect(readEmbed("?embed=0").embed).toBe(false);
   });
   test("reads pane and brain in embed mode", () => {
-    expect(readEmbed("?embed=1&pane=w5:p2&brain=1")).toEqual({ embed: true, pane: "w5:p2", brain: true });
+    expect(readEmbed("?embed=1&pane=w5:p2&brain=1"))
+      .toEqual({ embed: true, pane: "w5:p2", brain: true, view: null, controls: true });
   });
   test("ignores pane and brain outside embed mode", () => {
-    expect(readEmbed("?pane=w5:p2&brain=1")).toEqual({ embed: false, pane: null, brain: false });
+    expect(readEmbed("?pane=w5:p2&brain=1")).toEqual({ embed: false, pane: null, brain: false, view: null, controls: true });
   });
   test("empty pane is no pane", () => {
     expect(readEmbed("?embed=1&pane=").pane).toBe(null);
+  });
+  test("view takes chat or terminal, nothing else", () => {
+    expect(readEmbed("?embed=1&view=chat").view).toBe("chat");
+    expect(readEmbed("?embed=1&view=terminal").view).toBe("terminal");
+    expect(readEmbed("?embed=1&view=fleet").view).toBe(null);
+    expect(readEmbed("?embed=1").view).toBe(null);
+  });
+  test("controls are shown unless turned off", () => {
+    expect(readEmbed("?embed=1").controls).toBe(true);
+    expect(readEmbed("?embed=1&controls=1").controls).toBe(true);
+    expect(readEmbed("?embed=1&controls=0").controls).toBe(false);
+    expect(readEmbed("?embed=1&controls=false").controls).toBe(false);
+  });
+  test("view and controls mean nothing outside embed mode", () => {
+    expect(readEmbed("?view=chat&controls=0")).toEqual({ embed: false, pane: null, brain: false, view: null, controls: true });
   });
 });
 

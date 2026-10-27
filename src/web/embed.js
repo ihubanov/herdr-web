@@ -12,15 +12,31 @@
  * `embed` is on for `1`, `true` or a bare `?embed`; anything else is off, so a
  * stray `embed=0` does not strip the chrome. `pane` and `brain` only mean
  * anything in embed mode — outside it the full UI already has its own controls.
+ * The same goes for the two host-chosen settings:
+ *  - `view=chat|terminal`: the pane view to open in, overriding both the
+ *    server default and the browser's stored choice. Anything else is null
+ *    (no override).
+ *  - `controls=0|false`: hide the pane control strip's buttons (view toggle,
+ *    `view`, `detach`, read-only/controlling), for a host that does pane
+ *    switching in its own sidebar. Shown unless turned off.
  * @param {string} search  location.search, with or without the leading "?"
- * @returns {{ embed: boolean, pane: string | null, brain: boolean }}
+ * @returns {{ embed: boolean, pane: string | null, brain: boolean,
+ *             view: "chat" | "terminal" | null, controls: boolean }}
  */
 export function readEmbed(search) {
   const q = new URLSearchParams(search);
   const on = (/** @type {string | null} */ v) => v !== null && (v === "" || v === "1" || v === "true");
   const embed = on(q.get("embed"));
-  if (!embed) return { embed: false, pane: null, brain: false };
-  return { embed: true, pane: q.get("pane") || null, brain: on(q.get("brain")) };
+  if (!embed) return { embed: false, pane: null, brain: false, view: null, controls: true };
+  const v = q.get("view");
+  const c = q.get("controls");
+  return {
+    embed: true,
+    pane: q.get("pane") || null,
+    brain: on(q.get("brain")),
+    view: v === "chat" || v === "terminal" ? v : null,
+    controls: !(c === "0" || c === "false"),
+  };
 }
 
 /**
