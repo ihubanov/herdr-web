@@ -548,6 +548,21 @@
     #modal .box{width:min(94vw,520px);max-height:86vh;overflow-y:auto}
   }
 
+  /* ---------- embed (chromeless) mode ----------
+     ?embed=1: another app (the KAI v2 shell) iframes this page into its own
+     content area and draws the pane list itself, so the header, sidebar and
+     divider go and <main> is the whole page. Placed after the narrow-screen
+     block, and `body.embed` outranks its bare `body` rules either way. */
+  body.embed{grid-template-columns:1fr;grid-template-rows:1fr;grid-template-areas:"main"}
+  body.embed header,body.embed aside,body.embed #divider,body.embed #drawerscrim{display:none}
+  body.embed #brainview{top:0}
+  /* Nothing sits behind the brain view in embed mode, so closing it would leave a blank page. */
+  body.embed #brainclose{display:none}
+  /* ?embed=1&controls=0: the host switches panes and views itself, so the pane
+     control strip keeps its status text but loses its buttons. */
+  body.embed.embed-noctl #chatbtn,body.embed.embed-noctl #framebtn,
+  body.embed.embed-noctl #detach,body.embed.embed-noctl #ctlmode{display:none !important}
+
 </style>
 </head>
 <body>
