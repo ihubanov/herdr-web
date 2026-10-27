@@ -1,7 +1,7 @@
 // Tests for embed mode's URL parsing and pane pick (src/web/embed.js). Outside
 // src/web/ for the same reason as pane-poll.test.ts: that directory is served.
 import { describe, expect, test } from "bun:test";
-import { pickEmbedPane, readEmbed } from "../src/web/embed.js";
+import { pickEmbedPane, readEmbed, readEmbedMessage } from "../src/web/embed.js";
 
 describe("readEmbed", () => {
   test("off when absent", () => {
@@ -37,5 +37,39 @@ describe("pickEmbedPane", () => {
   });
   test("null when no pane was requested", () => {
     expect(pickEmbedPane(null, fleet, false)).toBe(null);
+  });
+  const withFocus = [{ pane_id: "w1:p1", focused: false }, { pane_id: "w5:p2", focused: true }];
+  test("bare embed falls back to the focused pane", () => {
+    expect(pickEmbedPane(null, withFocus, false, true)).toBe(withFocus[1]);
+  });
+  test("a wanted pane beats the focused one", () => {
+    expect(pickEmbedPane("w1:p1", withFocus, false, true)).toBe(withFocus[0]);
+  });
+  test("no fallback once picked", () => {
+    expect(pickEmbedPane(null, withFocus, true, true)).toBe(null);
+  });
+});
+
+describe("readEmbedMessage", () => {
+  const O = "https://kai.example";
+  test("reads attach", () => {
+    expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:attach", pane_id: "w5:p2" } }, O))
+      .toEqual({ kind: "attach", pane_id: "w5:p2" });
+  });
+  test("reads brain", () => {
+    expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:brain" } }, O)).toEqual({ kind: "brain" });
+  });
+  test("ignores another origin", () => {
+    expect(readEmbedMessage({ origin: "https://evil.example", data: { type: "herdr-embed:brain" } }, O)).toBe(null);
+  });
+  test("ignores attach without a usable pane id", () => {
+    for (const pane_id of [undefined, "", 5, "x".repeat(201)]) {
+      expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:attach", pane_id } }, O)).toBe(null);
+    }
+  });
+  test("ignores unrelated messages", () => {
+    for (const data of [null, "herdr-embed:brain", { type: "herdr-input-lock" }]) {
+      expect(readEmbedMessage({ origin: O, data }, O)).toBe(null);
+    }
   });
 });

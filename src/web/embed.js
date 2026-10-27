@@ -24,16 +24,48 @@ export function readEmbed(search) {
 }
 
 /**
- * The fleet entry the embed URL asked for, once, the first time it is listed.
- * Returns null when there is nothing to do: no pane requested, already picked,
- * or not (yet) in the fleet — the next fleet update tries again.
- * @template {{ pane_id: string }} F
- * @param {string | null} wanted  the ?pane= value
+ * The fleet entry embed mode should show, once, the first time it is listed.
+ * `wanted` is the ?pane= value or the pane the host last asked for over
+ * postMessage. With none and `orFocused` set (a bare `?embed=1`), it is the
+ * pane herdr has focused. Returns null when there is nothing to do: already
+ * picked, or not (yet) in the fleet — the next fleet update tries again.
+ * @template {{ pane_id: string, focused?: boolean }} F
+ * @param {string | null} wanted
  * @param {F[]} fleet
  * @param {boolean} done          true once the pane has been attached
+ * @param {boolean} [orFocused]   fall back to the focused pane when nothing is wanted
  * @returns {F | null}
  */
-export function pickEmbedPane(wanted, fleet, done) {
-  if (!wanted || done) return null;
-  return fleet.find((f) => f.pane_id === wanted) ?? null;
+export function pickEmbedPane(wanted, fleet, done, orFocused = false) {
+  if (done) return null;
+  if (wanted) return fleet.find((f) => f.pane_id === wanted) ?? null;
+  return orFocused ? fleet.find((f) => f.focused) ?? null : null;
+}
+
+/** Message types the host shell sends in (`herdr-embed:attach`, `herdr-embed:brain`)
+ *  and that embed mode posts back (`herdr-embed:ready`, `herdr-embed:active`). */
+export const EMBED_MSG = /** @type {const} */ ({
+  attach: "herdr-embed:attach",
+  brain: "herdr-embed:brain",
+  ready: "herdr-embed:ready",
+  active: "herdr-embed:active",
+});
+
+/**
+ * Read a message from the host shell. Only same-origin messages count: the
+ * host lives under the same origin (the KAI shell and /chat/ share it), and
+ * anything else could be a page that framed this one to steer it.
+ * @param {{ origin: string, data: unknown }} ev  the MessageEvent
+ * @param {string} origin                        location.origin
+ * @returns {{ kind: "attach", pane_id: string } | { kind: "brain" } | null}
+ */
+export function readEmbedMessage(ev, origin) {
+  if (ev.origin !== origin) return null;
+  const d = /** @type {any} */ (ev.data);
+  if (!d || typeof d !== "object") return null;
+  if (d.type === EMBED_MSG.brain) return { kind: "brain" };
+  if (d.type === EMBED_MSG.attach && typeof d.pane_id === "string" && d.pane_id && d.pane_id.length <= 200) {
+    return { kind: "attach", pane_id: d.pane_id };
+  }
+  return null;
 }
