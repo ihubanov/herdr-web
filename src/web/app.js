@@ -936,8 +936,15 @@ el.lockrelease.onclick = async () => {
 
 // The shim announces itself on load; answer immediately so a reloaded iframe
 // is not inert until the next poll.
+// The brain display has no input lock: no agent drives it, so its shim is told the user owns
+// input. Without this it keeps its locked default and the dashboard can only be watched.
 window.addEventListener("message", (ev) => {
-  if (ev.data?.kind === "herdr-shim-ready") pushLockToFrame();
+  if (ev.data?.kind !== "herdr-shim-ready") return;
+  if (ev.source && ev.source === brainframe.contentWindow) {
+    try { brainframe.contentWindow.postMessage({ kind: "herdr-input-lock", state: { owner: "user" } }, "*"); } catch {}
+    return;
+  }
+  pushLockToFrame();
 });
 
 // Releasing on unload keeps a closed tab from parking the display.
