@@ -558,6 +558,10 @@
   body.embed #brainview{top:0}
   /* Nothing sits behind the brain view in embed mode, so closing it would leave a blank page. */
   body.embed #brainclose{display:none}
+  /* ?embed=1&controls=0: the host switches panes and views itself, so the pane
+     control strip keeps its status text but loses its buttons. */
+  body.embed.embed-noctl #chatbtn,body.embed.embed-noctl #framebtn,
+  body.embed.embed-noctl #detach,body.embed.embed-noctl #ctlmode{display:none !important}
 
 </style>
 </head>
