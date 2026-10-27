@@ -1046,7 +1046,7 @@ function renderTree() {
           <span class="nm">${esc(f.title)}</span>
           <span class="t" data-since="${f.since}">${ago(f.since)}</span>
           <button class="act" data-rentab="${esc(f.tab_id || "")}" data-name="${esc(f.title)}" title="Rename">✎</button>
-          ${me?.canDestroy ? `<button class="act danger" data-closetab="${esc(f.tab_id || "")}" data-name="${esc(f.title)}" title="Close session">✕</button>` : ""}
+          ${me?.canClose ? `<button class="act danger" data-closetab="${esc(f.tab_id || "")}" data-name="${esc(f.title)}" title="Close session">✕</button>` : ""}
         </div>`).join("")}</div>
     </div>`;
   }).join("");
