@@ -2,6 +2,7 @@
 // left, terminal as the main surface. The fleet grid is an overlay view you
 // toggle to, and what you see before picking an agent.
 import { createGonePanes } from "./pane-poll.js";
+import { pickEmbedPane, readEmbed } from "./embed.js";
 
 const { Terminal } = window;
 const FitAddon = window.FitAddon?.FitAddon || window.FitAddon;
@@ -9,6 +10,10 @@ const FitAddon = window.FitAddon?.FitAddon || window.FitAddon;
 const token = new URLSearchParams(location.search).get("token") || "";
 const auth = (p) => token ? `${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : p;  // cookie sessions carry no token in URLs
 const $ = (id) => document.getElementById(id);
+// ?embed=1[&pane=<id>][&brain=1]: chromeless, inside another app's shell (see embed.js).
+const EMBED = readEmbed(location.search);
+if (EMBED.embed) document.body.classList.add("embed");
+let embedAttached = false;
 
 const el = {
   tree: $("tree"), search: $("search"), conn: $("conn"), crumb: $("crumb"),
@@ -1694,7 +1699,16 @@ async function loadFleet(force = false) {
     if (!r.ok) return;
     fleet = (await r.json()).fleet || [];
     renderAll();
+    embedSelect();
   } catch {}
+}
+
+/** In embed mode, attach the ?pane= pane the first time the fleet lists it. */
+function embedSelect() {
+  const f = pickEmbedPane(EMBED.pane, fleet, embedAttached);
+  if (!f) return;
+  embedAttached = true;
+  attach(f);
 }
 
 function connectEvents() {
@@ -1702,7 +1716,7 @@ function connectEvents() {
   ws.onopen = () => { el.conn.className = "live"; el.conn.textContent = "live"; };
   ws.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch { return; }
-    if (m.event === "fleet") { fleet = m.data.fleet || []; alertBlocked(fleet); renderAll(); }
+    if (m.event === "fleet") { fleet = m.data.fleet || []; alertBlocked(fleet); renderAll(); embedSelect(); }
     else if (m.event === "presence") { presence = m.data.presence || {}; renderChat(); }
     else if (m.event === "queue") {
       const msg = m.data.message;
@@ -1731,6 +1745,8 @@ setView("fleet");
 loadMe();
 loadFleet();
 connectEvents();
+// ?embed=1&brain=1 is the host app's brain button: open the SAGE dashboard straight away.
+if (EMBED.brain) brainbtn.click();
 
 // ================================================================== chat view
 //

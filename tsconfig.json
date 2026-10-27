@@ -17,6 +17,7 @@
     "tools/**/*.ts",
     "test/**/*.ts",
     "gen-tokens.ts",
-    "src/web/pane-poll.js"
+    "src/web/pane-poll.js",
+    "src/web/embed.js"
   ]
 }
