@@ -116,11 +116,13 @@ count leads because tabs truncate from the right.
 `+▣` in the sidebar header creates a space; `+` on a space header creates a
 session in it; `✎` renames. Keyboard: `n` new session, `N` new space.
 
-**Creating is open to everyone; closing is admin-only.** In a shared UI, one
-person closing another's running session is not recoverable, so `pane.close`,
-`tab.close`, `workspace.close` and `worktree.remove` require the admin token.
-Non-admins do not see the `✕` buttons at all, and the API returns 403 with
-`adminOnly: true` if called directly.
+**Creating is open to everyone; closing a session is open to every signed-in
+user.** Any named user (and the admin) can close a session (`pane.close`,
+`tab.close`); tunnel guests on an ephemeral token cannot. Closing a whole
+space or removing a worktree (`workspace.close`, `worktree.remove`) takes other
+people's sessions with it, so those still require the admin token. Anyone who
+cannot do an action does not see its `✕` button, and the API returns 403 if
+called directly (`adminOnly: true` for the admin-only ones).
 
 ### One input: the terminal
 

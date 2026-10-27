@@ -16,6 +16,8 @@ export interface User {
    *  because an anonymous voice in a shared chat is confusing, not a privilege. */
   name: string;
   isAdmin: boolean;
+  /** A tunnel guest (ephemeral token): may watch and talk, never close anything. */
+  guest: boolean;
 }
 
 /** Constant-time compare, length-guarded (timingSafeEqual throws on mismatch). */
@@ -76,15 +78,15 @@ export class Identity {
   /** Resolve a presented token to a user, or null to reject. Admin wins first. */
   resolve(token: string | null | undefined): User | null {
     if (!token) return null;
-    if (eq(token, this.adminToken)) return { name: "admin", isAdmin: true };
+    if (eq(token, this.adminToken)) return { name: "admin", isAdmin: true, guest: false };
     // Ephemeral tokens are NOT admin: a tunnel guest should not be able to
     // close panes or disconnect other viewers.
     for (const [tok, meta] of this.ephemeral) {
       if (meta.expires <= Date.now()) { this.ephemeral.delete(tok); continue; }
-      if (eq(token, tok)) return { name: meta.label, isAdmin: false };
+      if (eq(token, tok)) return { name: meta.label, isAdmin: false, guest: true };
     }
     for (const [name, tok] of this.users) {
-      if (eq(token, tok)) return { name, isAdmin: false };
+      if (eq(token, tok)) return { name, isAdmin: false, guest: false };
     }
     return null;
   }

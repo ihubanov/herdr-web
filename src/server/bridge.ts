@@ -409,13 +409,13 @@ const ALLOWED_PREFIXES = [
 const DENIED = new Set(["server.stop", "server.live_handoff"]);
 
 /**
- * Destructive structure changes. Creation is open to everyone; destruction is
- * admin-only, because in a shared UI one person closing another's running
- * session is not recoverable.
+ * Destructive structure changes. Creation is open to everyone. Closing a
+ * session is open to every signed-in user — people clean up their own chats —
+ * but not to tunnel guests. Wider destruction (a whole space, a worktree on
+ * disk) stays admin-only, because it takes other people's sessions with it.
  */
-const ADMIN_ONLY = new Set([
-  "pane.close", "tab.close", "workspace.close", "worktree.remove",
-]);
+const ADMIN_ONLY = new Set(["workspace.close", "worktree.remove"]);
+const NO_GUESTS = new Set(["pane.close", "tab.close"]);
 
 // Start the resident fleet tracker before serving.
 const stopFleet = startFleetTracker();
@@ -1384,7 +1384,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         return Response.json({
           name: u.name, label: Identity.label(u), isAdmin: u.isAdmin,
           multiuser: identity.multiuser, users: identity.multiuser ? identity.names() : [],
-          canDestroy: u.isAdmin, adminOnly: [...ADMIN_ONLY],
+          canDestroy: u.isAdmin, canClose: !u.guest, adminOnly: [...ADMIN_ONLY],
           defaultLaunchCmd: DEFAULT_LAUNCH_CMD,
           lockLaunch: LOCK_LAUNCH,
           agentName: AGENT_NAME,
@@ -1842,6 +1842,9 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         if (ADMIN_ONLY.has(method) && !whoami(req)!.isAdmin) {
           return Response.json(
             { error: `${method} is admin only`, adminOnly: true }, { status: 403 });
+        }
+        if (NO_GUESTS.has(method) && whoami(req)!.guest) {
+          return Response.json({ error: `guests cannot use ${method}` }, { status: 403 });
         }
         try {
           const res = await rpc(method, params ?? {});
