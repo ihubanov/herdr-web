@@ -2,7 +2,7 @@
 // left, terminal as the main surface. The fleet grid is an overlay view you
 // toggle to, and what you see before picking an agent.
 import { createGonePanes } from "./pane-poll.js";
-import { pickEmbedPane, readEmbed } from "./embed.js";
+import { EMBED_MSG, pickEmbedPane, readEmbed, readEmbedMessage } from "./embed.js";
 
 const { Terminal } = window;
 const FitAddon = window.FitAddon?.FitAddon || window.FitAddon;
@@ -11,9 +11,16 @@ const token = new URLSearchParams(location.search).get("token") || "";
 const auth = (p) => token ? `${p}${p.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : p;  // cookie sessions carry no token in URLs
 const $ = (id) => document.getElementById(id);
 // ?embed=1[&pane=<id>][&brain=1]: chromeless, inside another app's shell (see embed.js).
+// After load the host drives the view over postMessage instead (embedMessage).
 const EMBED = readEmbed(location.search);
 if (EMBED.embed) document.body.classList.add("embed");
+let embedWanted = EMBED.pane;
 let embedAttached = false;
+/** Tell the host shell something. Same origin only, like the messages it sends in. */
+function embedPost(msg) {
+  if (!EMBED.embed || window.parent === window) return;
+  try { window.parent.postMessage(msg, location.origin); } catch { /* host gone */ }
+}
 
 const el = {
   tree: $("tree"), search: $("search"), conn: $("conn"), crumb: $("crumb"),
@@ -289,6 +296,7 @@ function attach(f, mode = "observe") {
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = f.pane_id;
   gonePanes.clear(f.pane_id);                    // attaching proves it is alive
+  embedPost({ type: EMBED_MSG.active, pane_id: f.pane_id });
   activeMode = mode;
   // Adopt the cached capability BEFORE switching views — setView paints the
   // button from `capability`, and a stale value flashes the previous pane's
@@ -1703,12 +1711,30 @@ async function loadFleet(force = false) {
   } catch {}
 }
 
-/** In embed mode, attach the ?pane= pane the first time the fleet lists it. */
+/** In embed mode, attach the wanted pane the first time the fleet lists it. A bare
+ *  ?embed=1 takes the focused pane; ?embed=1&brain=1 attaches nothing behind the brain. */
 function embedSelect() {
-  const f = pickEmbedPane(EMBED.pane, fleet, embedAttached);
+  if (!EMBED.embed) return;
+  const f = pickEmbedPane(embedWanted, fleet, embedAttached, !EMBED.brain);
   if (!f) return;
   embedAttached = true;
   attach(f);
+}
+
+/** The host shell switching the view in place: a pane, or the brain. */
+function embedMessage(ev) {
+  const m = readEmbedMessage(ev, location.origin);
+  if (!m) return;
+  if (m.kind === "brain") {
+    if (!brainview.classList.contains("on")) brainbtn.click();
+    return;
+  }
+  closeBrain();
+  if (m.pane_id === selected) { embedPost({ type: EMBED_MSG.active, pane_id: selected }); return; }
+  // Not listed yet (first load still in flight): embedSelect picks it up on the next fleet.
+  embedWanted = m.pane_id;
+  embedAttached = false;
+  embedSelect();
 }
 
 function connectEvents() {
@@ -1747,6 +1773,11 @@ loadFleet();
 connectEvents();
 // ?embed=1&brain=1 is the host app's brain button: open the SAGE dashboard straight away.
 if (EMBED.brain) brainbtn.click();
+if (EMBED.embed) {
+  window.addEventListener("message", embedMessage);
+  // Every page load is a (re-)init; the host holds its choice until it sees this.
+  embedPost({ type: EMBED_MSG.ready });
+}
 
 // ================================================================== chat view
 //
