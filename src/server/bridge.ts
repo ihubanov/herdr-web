@@ -20,6 +20,7 @@ import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPen
 import { detect as detectStream, detectFromPane as detectStreamFromPane, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
+import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
 import * as SharedTerm from "./shared-terminal.ts";
 
 // Loopback by default. HERDR_WEB_HOST widens the bind (e.g. 0.0.0.0 inside a container whose
@@ -157,6 +158,25 @@ function sessionTitle(id: string): string | null {
   titleCache.set(id, { at: Date.now(), title });
   return title;
 }
+/**
+ * Which conversations a pane holds RIGHT NOW (session id -> pane id): two writers corrupt one
+ * transcript, so the picker marks these and resume refuses them. pane.list carries no tokens,
+ * hence one pane.get per pane — a handful, and only on a picker open or a resume.
+ */
+async function openSessions(): Promise<Map<string, string>> {
+  const openIn = new Map<string, string>();
+  try {
+    const pl: any = await call("pane.list");
+    for (const p of pl?.panes ?? []) {
+      try {
+        const sid = sessionIdFor((await call("pane.get", { pane_id: p.pane_id }))?.pane);
+        if (sid) openIn.set(sid, p.pane_id);
+      } catch { /* pane vanished mid-scan */ }
+    }
+  } catch { /* herdr unreachable: no marks rather than no answer */ }
+  return openIn;
+}
+
 async function listSessions(): Promise<Array<{ id: string; title: string | null; messages: number; created_at: number; last_activity_at: number; busy: boolean }>> {
   const r = await fetch(SESSIONS_URL, { headers: SESSIONS_TOKEN ? { authorization: `Bearer ${SESSIONS_TOKEN}` } : {} });
   if (!r.ok) throw new Error(`session list ${r.status}`);
@@ -1293,19 +1313,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         try {
           const sessions = await listSessions();
-          // Which of them a pane holds RIGHT NOW: two writers corrupt one transcript, so the picker
-          // marks these and the "+" dialog refuses them. pane.list carries no tokens, hence one
-          // pane.get per pane — a handful, and only when the dialog opens.
-          const openIn = new Map<string, string>();
-          try {
-            const pl: any = await call("pane.list");
-            for (const p of pl?.panes ?? []) {
-              try {
-                const sid = sessionIdFor((await call("pane.get", { pane_id: p.pane_id }))?.pane);
-                if (sid) openIn.set(sid, p.pane_id);
-              } catch { /* pane vanished mid-scan */ }
-            }
-          } catch { /* herdr unreachable: list without marks rather than no list */ }
+          const openIn = await openSessions();
           return Response.json({ sessions: sessions.map((s) => ({ ...s, open_in: openIn.get(s.id) ?? null })) });
         }
 
@@ -1313,6 +1321,39 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
       }
 
+
+      // Reopen a conversation in a NEW tab in one call: what the "+" dialog's picker does in two
+      // (tab.create, then the launch command), for a host that has no dialog. Same contract.
+      if (url.pathname === "/api/resume" && req.method === "POST") {
+        if (!RESUME_ENABLED) return Response.json({ error: "not found" }, { status: 404 });
+        let b: any;
+        try { b = await req.json(); } catch { return Response.json({ error: "invalid JSON body" }, { status: 400 }); }
+        const sid = typeof b?.session_id === "string" ? b.session_id : "";
+        const wsId = typeof b?.workspace_id === "string" ? b.workspace_id : "";
+        if (!SESSION_ID_RE.test(sid)) return Response.json({ error: "session_id required" }, { status: 400 });
+        if (!wsId) return Response.json({ error: "workspace_id required" }, { status: 400 });
+        const cmd = resumeCommand(DEFAULT_LAUNCH_CMD, sid, LOCK_LAUNCH && b?.skip_permissions === true);
+        if (!cmd) return Response.json({ error: "no launch command configured (HERDR_WEB_DEFAULT_LAUNCH_CMD)" }, { status: 409 });
+        // Two writers corrupt one transcript: refuse a conversation a pane already holds.
+        const held = (await openSessions()).get(sid);
+        if (held) return Response.json({ error: `already open in pane ${held}`, open_in: held }, { status: 409 });
+        // Default to where that workspace's sessions already run.
+        const cwd = (typeof b?.cwd === "string" && b.cwd) || getFleet().find((f) => f.workspace_id === wsId)?.cwd || "";
+        if (!cwd) return Response.json({ error: "cwd required (workspace has no session to take it from)" }, { status: 400 });
+        let label = typeof b?.label === "string" ? b.label.trim().slice(0, 90) : "";
+        if (!label) label = (await listSessions().catch(() => [])).find((s) => s.id === sid)?.title?.slice(0, 90) || "";
+        try {
+          const res: any = await call("tab.create", { workspace_id: wsId, cwd, label: label || null, focus: false });
+          const paneId = res?.root_pane?.pane_id ?? res?.pane?.pane_id;
+          if (!paneId) return Response.json({ error: "tab.create returned no pane" }, { status: 502 });
+          await new Promise((r) => setTimeout(r, 1500));   // let the shell come up, as the dialog does
+          await call("pane.send_input", { pane_id: paneId, text: cmd, keys: ["enter"] });
+          try { await refreshFleet(); } catch {}
+          return Response.json({ pane_id: paneId, tab_id: res?.tab?.tab_id ?? res?.root_pane?.tab_id ?? null, session_id: sid });
+        } catch (e: any) {
+          return Response.json({ error: String(e?.message || e) }, { status: 502 });
+        }
+      }
 
       if (url.pathname === "/api/health") {
         try {
