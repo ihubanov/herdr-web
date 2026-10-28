@@ -364,6 +364,25 @@
   .tgbody{padding:1px 8px 5px}
   .tgbody .line{padding-right:2px}
 
+  /* A turn's working, in one box. Live it is a window that follows the stream,
+     the oldest lines fading out at the top; finished, it folds to one line. */
+  .work{border:1px solid var(--line);border-radius:6px;margin:2px 0 3px;
+    background:rgba(255,255,255,.012);overflow:hidden}
+  .wkhdr{display:block;width:100%;text-align:left;font:inherit;font-size:11px;
+    letter-spacing:.02em;padding:3px 8px;cursor:pointer;color:var(--dim);
+    background:transparent;border:0}
+  .wkhdr:hover{color:var(--fg);background:rgba(255,255,255,.03)}
+  .work.live .wkhdr{color:var(--working)}
+  .wkbody{padding:2px 8px 5px}
+  .work:not(.live):not(.open) .wkbody{display:none}
+  .work.live:not(.open) .wkbody{max-height:13em;overflow:hidden}
+  .work.live.over:not(.open) .wkbody{
+    -webkit-mask-image:linear-gradient(to bottom,transparent 0,#000 4em);
+    mask-image:linear-gradient(to bottom,transparent 0,#000 4em)}
+  .wkbody .msg{display:block;padding:0}
+  .wkbody .msg.turn{margin-top:0}
+  .wkbody .msg .av{display:none}
+
   #composer{flex-direction:column;align-items:stretch;gap:0}
   #composer .crow{display:flex;gap:8px;align-items:center;width:100%}
   #cclip{flex:0 0 auto;font-size:15px;line-height:1;padding:6px 8px;cursor:pointer;
