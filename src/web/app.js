@@ -2006,6 +2006,96 @@ function appendTool(author, innerHTML, name, live) {
   scrollMsgs();
 }
 
+/* ---------------------------------------------------------------- work fold
+ * Everything a turn does on the way to its answer — reasoning, tool calls, the
+ * "let me check X" asides between them — goes into one box per turn. While the
+ * turn runs the box is a fixed-height window that follows the stream, older
+ * lines fading out at the top; when the turn ends it folds to one line and only
+ * the answer stays in view. Clicking the header opens it either way.
+ *
+ * Text is the ambiguous kind: until the turn ends nobody knows whether a
+ * paragraph is an aside or the answer. So text renders below the box, and is
+ * pulled in only if more work follows it. Whatever is still below at the end
+ * was the answer.
+ * -------------------------------------------------------------------------- */
+let work = null;                 // {root, body, tools, names, thought}
+let afterWork = [];              // agent text rendered since the last step
+
+function workLabel(w) {
+  const r = w.root;
+  const open = r.classList.contains("open");
+  const live = r.classList.contains("live");
+  const bits = [];
+  if (w.tools) {
+    const shown = w.names.slice(0, 3).join(", ");
+    const rest = w.names.length > 3 ? ` +${w.names.length - 3}` : "";
+    bits.push(`${w.tools} tool${w.tools === 1 ? "" : "s"}${shown ? ` · ${shown}${rest}` : ""}`);
+  }
+  if (w.thought && !w.tools) bits.push("reasoning");
+  return `${open ? "▾" : "▸"} ${live ? "working…" : "worked"}${bits.length ? ` · ${bits.join(" · ")}` : ""}`;
+}
+
+function workRefresh(w) {
+  const h = w.root.querySelector(".wkhdr");
+  if (h) h.textContent = workLabel(w);
+  w.body.scrollTop = w.body.scrollHeight;
+  // Fade the top only when something is actually scrolled out of sight.
+  w.root.classList.toggle("over", w.body.scrollHeight > w.body.clientHeight + 2);
+}
+
+function workOpen(author, live) {
+  if (work) {
+    // Text that came out between steps was an aside; it belongs in the box.
+    for (const n of afterWork) work.body.appendChild(n);
+    afterWork = [];
+    if (live) work.root.classList.add("live");
+    return work;
+  }
+  // The box takes the place of the turn's first output, so asides that came
+  // before the first step move in without the order on screen changing.
+  const first = afterWork[0];
+  const shell = msgBlock(author, true, "");
+  if (first?.parentNode) {
+    first.parentNode.insertBefore(shell, first);
+    if (first.classList.contains("turn")) {
+      shell.classList.add("turn");
+      const av = first.querySelector(".av");
+      if (av) shell.querySelector(".av")?.replaceWith(av.cloneNode(true));
+    }
+  }
+  const root = document.createElement("div");
+  // Replayed history arrives folded; only a turn happening now gets the window.
+  root.className = `work${live ? " live" : ""}`;
+  root.innerHTML = `<button class="wkhdr" type="button"></button><div class="wkbody"></div>`;
+  shell.querySelector(".body").appendChild(root);
+  work = { root, body: root.querySelector(".wkbody"), tools: 0, names: [], thought: false };
+  root._work = work;
+  for (const n of afterWork) work.body.appendChild(n);
+  afterWork = [];
+  return work;
+}
+
+/** Render a step into the current turn's box. */
+function inWork(author, live, fn) {
+  const w = workOpen(author, live);
+  const realMsgs = el.msgs;
+  el.msgs = w.body;
+  try { fn(w); } finally { el.msgs = realMsgs; }
+  workRefresh(w);
+  scrollMsgs();
+}
+
+/** The turn is over: fold its box. What is left below it is the answer. */
+function workClose() {
+  endToolGroup(true);
+  if (work) {
+    work.root.classList.remove("live", "open", "over");
+    workRefresh(work);
+  }
+  work = null;
+  afterWork = [];
+}
+
 /* ------------------------------------------------------------------ history
  * The stream opens on the tail of the transcript; older turns are paged in on
  * demand. Frames are rendered into a detached node first, then inserted above
@@ -2035,9 +2125,14 @@ async function loadHistory() {
     // Render detached so a half-built history never flickers into the log.
     const holder = document.createElement("div");
     const realMsgs = el.msgs, realSpeaker = lastSpeaker;
+    const realWork = work, realAfter = afterWork;
     el.msgs = holder; lastSpeaker = null; renderingHistory = true;
-    try { for (const f of frames) handleFrame(f); }
-    finally { el.msgs = realMsgs; lastSpeaker = realSpeaker; renderingHistory = false; }
+    work = null; afterWork = [];
+    try { for (const f of frames) handleFrame(f); workClose(); }
+    finally {
+      el.msgs = realMsgs; lastSpeaker = realSpeaker; renderingHistory = false;
+      work = realWork; afterWork = realAfter;
+    }
 
     const before = el.msgs.scrollHeight;
     const anchor = bar ? bar.nextSibling : el.msgs.firstChild;
@@ -2155,7 +2250,7 @@ function turnTick() {
 
 /** Fold the ticking line into a static record of what the turn cost. */
 function turnEnd(usage, durationMs) {
-  endToolGroup(true);
+  workClose();
   if (!turn) return;
   clearInterval(turn.timer);
   const out = Math.max(turn.out, usage?.output_tokens ?? 0);
@@ -2378,6 +2473,16 @@ function collapseLive() {
   }
 }
 el.msgs.addEventListener("click", (e) => {
+  const wk = e.target.closest(".wkhdr");
+  if (wk) {
+    const root = wk.closest(".work");
+    if (root) {
+      root.classList.toggle("open");
+      if (root._work) workRefresh(root._work);
+      markOverflow(root);
+    }
+    return;
+  }
   const hdr = e.target.closest(".tghdr");
   if (hdr) {
     const root = hdr.closest(".toolgroup");
@@ -2514,6 +2619,7 @@ function handleFrame(f) {
     replayThrough = typeof f.seq === "number" ? f.seq : -1;
     if (turn) { clearInterval(turn.timer); turn = null; }
     toolGroup = null;
+    work = null; afterWork = [];
     el.msgs.innerHTML = "";
     historyFrom = Number(f.historyFrom ?? 0) || 0;
     if (historyFrom > 0) el.msgs.appendChild(makeLoadMore());
@@ -2542,7 +2648,7 @@ function handleFrame(f) {
   // A completed turn is "done" even if no further frame follows it.
   if (f.type === "frame" && f.msg?.type === "result") {
     collapseLive();
-    endToolGroup(true);
+    workClose();
     turnEnd(f.msg.usage, f.msg.duration_ms);
     return;
   }
@@ -2584,6 +2690,8 @@ function handleFrame(f) {
     // opens a turn, and ⎿ attaches a result to the call that produced it. The
     // hierarchy is the point — a flat list loses which output came from where.
     if (c.type === "text" && c.text?.trim()) {
+      // Someone spoke to the agent: whatever it was doing before is finished.
+      if (!isAgent) workClose();
       endToolGroup(!renderingHistory);
       // A <system-reminder> is harness plumbing, not conversation. The one that
       // carries attribution is the exception worth reading: it names the author
@@ -2592,26 +2700,35 @@ function handleFrame(f) {
       const { text, author } = liftReminders(c.text);
       if (!text.trim()) continue;                  // the block was only plumbing
       const t = `<div class="md">${mdToHtml(text)}</div>`;
-      msgBlock(author ?? f.author, isAgent,
+      const d = msgBlock(author ?? f.author, isAgent,
         `<div class="line"><span class="glyph dot">●</span>` +
         (text.length > 2600 ? clamped(t, "txt") : `<div class="txt">${t}</div>`) + `</div>`);
+      if (isAgent) afterWork.push(d);
     } else if (c.type === "thinking" && c.thinking?.trim()) {
       endToolGroup(!renderingHistory);
       const t = `<div class="md">${mdToHtml(c.thinking)}</div>`;
-      msgBlock(f.author, true,
-        `<div class="line"><span class="glyph spark">✳</span>` +
-        clamped(t, "think", true) + `</div>`);
+      inWork(f.author, !isReplay, (w) => {
+        w.thought = true;
+        msgBlock(f.author, true,
+          `<div class="line"><span class="glyph spark">✳</span>` +
+          clamped(t, "think", true) + `</div>`);
+      });
     } else if (c.type === "tool_use") {
-      appendTool(f.author,
-        `<div class="line"><span class="glyph dot">●</span>` +
-        `<div class="tool">${toolLine(c.name, c.input)}</div></div>`, c.name || "tool", !isReplay);
+      inWork(f.author, !isReplay, (w) => {
+        w.tools++;
+        const n = c.name || "tool";
+        if (!w.names.includes(n)) w.names.push(n);
+        appendTool(f.author,
+          `<div class="line"><span class="glyph dot">●</span>` +
+          `<div class="tool">${toolLine(c.name, c.input)}</div></div>`, n, !isReplay);
+      });
     } else if (c.type === "tool_result") {
       const body = unwrapJson(toolResultText(c.content));
       const err = /^(exit code [1-9]|fatal:|error|traceback)/i.test(body.trim());
       const t = esc(body.trim());
-      appendTool(f.author,
+      inWork(f.author, !isReplay, () => appendTool(f.author,
         `<div class="line nested"><span class="glyph hook">⎿</span>` +
-        clamped(t, `out${err ? " err" : ""}`, !isReplay) + `</div>`, null, !isReplay);
+        clamped(t, `out${err ? " err" : ""}`, !isReplay) + `</div>`, null, !isReplay));
     }
   }
 }
