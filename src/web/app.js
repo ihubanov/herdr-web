@@ -2625,6 +2625,8 @@ function handleFrame(f) {
     if (historyFrom > 0) el.msgs.appendChild(makeLoadMore());
     appendSys(f.source === "transcript"
       ? `reading the session transcript${f.session ? ` · ${f.session}` : ""} — history and live updates, replies go in as keystrokes`
+      // Embedded, the host owns sessions: the agent name and session id are noise there.
+      : EMBED.embed ? "connected"
       : `connected to ${f.agent ?? "agent"}${f.session ? ` · ${f.session}` : ""}`);
     return;
   }

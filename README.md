@@ -262,6 +262,13 @@ HERDR_WEB_RESUME=1                         # "+" offers existing conversations; 
 HERDR_WEB_SESSIONS_URL=http://127.0.0.1:8787/v1/beast/sessions   # where that list comes from (default); token: HERDR_WEB_SESSIONS_TOKEN or BEAST_SERVER_TOKEN, server-held
 ```
 
+With `HERDR_WEB_RESUME=1`, a host that embeds herdr-web can do the same without
+the dialog: `GET /api/sessions` lists conversations (`open_in` is the pane
+holding one, or `null` when it is closed), and `POST /api/resume` with
+`{"session_id", "workspace_id", "cwd"?, "label"?, "skip_permissions"?}` reopens
+one in a new tab and answers `{"pane_id", "tab_id", "session_id"}`. It needs
+`HERDR_WEB_DEFAULT_LAUNCH_CMD`, and refuses (409) a conversation a pane already holds.
+
 **Off by default on purpose.** An iframe puts agent-controlled content inside the
 page holding your token, so a prompt-injected agent could render a convincing
 fake prompt inside a UI you trust. This is a switch on an attack surface, not a
