@@ -107,6 +107,10 @@ if (EMBED.view) preferChat = EMBED.view === "chat";
 /** Chat chosen explicitly ON a pane that draws its own TUI. Separate from
  *  preferChat: terminal is the default for those, and this is the opt-out. */
 let tuiChat = LS.get("tuiChat", null) ?? false;
+// The host's ?view= applies to TUI panes too. Without this a pane that draws
+// its own TUI lands in the terminal (the mirror rule), so a host asking for
+// chat would be silently overridden; honour its choice for TUI panes here.
+if (EMBED.view) tuiChat = EMBED.view === "chat";
 // Capability is a per-pane round trip. Caching it means only the FIRST open of
 // a pane can flash the terminal before landing on chat; every later open goes
 // straight there.
@@ -1724,12 +1728,18 @@ function embedSelect() {
   attach(f);
 }
 
-/** The host shell switching the view in place: a pane, or the brain. */
+/** The host shell switching the view in place: a pane, the brain, or the
+ *  chat⇄terminal view of the current pane. */
 function embedMessage(ev) {
   const m = readEmbedMessage(ev, location.origin);
   if (!m) return;
   if (m.kind === "brain") {
     if (!brainview.classList.contains("on")) brainbtn.click();
+    return;
+  }
+  if (m.kind === "view") {
+    closeBrain();
+    setEmbedView(m.view);
     return;
   }
   closeBrain();
@@ -1738,6 +1748,29 @@ function embedMessage(ev) {
   embedWanted = m.pane_id;
   embedAttached = false;
   embedSelect();
+}
+
+/** Switch the current pane between chat and terminal for an embed host that
+ *  draws the toggle in its own chrome (the control strip is hidden under
+ *  ?controls=0). Mirrors the chatbtn: remembers the choice the same way, and on
+ *  a pane that draws its own TUI sets the TUI-chat override so chat is honoured
+ *  there too. A no-op until a pane is selected; the ?view= seed covers the first
+ *  paint before any message arrives. */
+function setEmbedView(target) {
+  const toChat = target === "chat";
+  preferChat = toChat;
+  LS.set("preferChat", preferChat);
+  if (selected && capability?.tui) {
+    tuiChat = toChat;
+    LS.set("tuiChat", tuiChat);
+  }
+  if (!selected) return;
+  if (toChat) {
+    if (chatAvailable()) openChat(selected);
+  } else {
+    if (view === "chat") closeChat();
+    setView("terminal");
+  }
 }
 
 function connectEvents() {
