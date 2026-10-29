@@ -75,6 +75,17 @@ describe("readEmbedMessage", () => {
   test("reads brain", () => {
     expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:brain" } }, O)).toEqual({ kind: "brain" });
   });
+  test("reads view chat/terminal", () => {
+    expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:view", view: "chat" } }, O))
+      .toEqual({ kind: "view", view: "chat" });
+    expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:view", view: "terminal" } }, O))
+      .toEqual({ kind: "view", view: "terminal" });
+  });
+  test("ignores view with a bad target", () => {
+    for (const view of [undefined, "fleet", "", 1]) {
+      expect(readEmbedMessage({ origin: O, data: { type: "herdr-embed:view", view } }, O)).toBe(null);
+    }
+  });
   test("ignores another origin", () => {
     expect(readEmbedMessage({ origin: "https://evil.example", data: { type: "herdr-embed:brain" } }, O)).toBe(null);
   });

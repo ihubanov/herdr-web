@@ -58,11 +58,13 @@ export function pickEmbedPane(wanted, fleet, done, orFocused = false) {
   return orFocused ? fleet.find((f) => f.focused) ?? null : null;
 }
 
-/** Message types the host shell sends in (`herdr-embed:attach`, `herdr-embed:brain`)
- *  and that embed mode posts back (`herdr-embed:ready`, `herdr-embed:active`). */
+/** Message types the host shell sends in (`herdr-embed:attach`, `herdr-embed:brain`,
+ *  `herdr-embed:view`) and that embed mode posts back (`herdr-embed:ready`,
+ *  `herdr-embed:active`). */
 export const EMBED_MSG = /** @type {const} */ ({
   attach: "herdr-embed:attach",
   brain: "herdr-embed:brain",
+  view: "herdr-embed:view",
   ready: "herdr-embed:ready",
   active: "herdr-embed:active",
 });
@@ -73,13 +75,17 @@ export const EMBED_MSG = /** @type {const} */ ({
  * anything else could be a page that framed this one to steer it.
  * @param {{ origin: string, data: unknown }} ev  the MessageEvent
  * @param {string} origin                        location.origin
- * @returns {{ kind: "attach", pane_id: string } | { kind: "brain" } | null}
+ * @returns {{ kind: "attach", pane_id: string } | { kind: "brain" }
+ *            | { kind: "view", view: "chat" | "terminal" } | null}
  */
 export function readEmbedMessage(ev, origin) {
   if (ev.origin !== origin) return null;
   const d = /** @type {any} */ (ev.data);
   if (!d || typeof d !== "object") return null;
   if (d.type === EMBED_MSG.brain) return { kind: "brain" };
+  if (d.type === EMBED_MSG.view && (d.view === "chat" || d.view === "terminal")) {
+    return { kind: "view", view: d.view };
+  }
   if (d.type === EMBED_MSG.attach && typeof d.pane_id === "string" && d.pane_id && d.pane_id.length <= 200) {
     return { kind: "attach", pane_id: d.pane_id };
   }
