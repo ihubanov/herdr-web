@@ -315,7 +315,10 @@ sizes then scale *down*, and stay sharp.
 Don't start it directly from application code. `POST /api/share` is the one code
 path the window button, `herdr-share.sh` and the MCP tools all go through; it
 picks the display number, and three callers each picking their own is how one
-pane ended up with two displays that could not stop each other.
+pane ended up with two displays that could not stop each other. Each pane gets
+its own display slot (`:50`–`:89`, gate port `9400+n`), handed out by the bridge and
+kept in `$XDG_RUNTIME_DIR/herdr-share-slots.json`; a pane that has closed has its
+display stopped and its slot freed within about two minutes.
 
 ### For agents: `tools/mcp-server.ts`
 
