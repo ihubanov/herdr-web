@@ -21,6 +21,7 @@ import { detect as detectStream, detectFromPane as detectStreamFromPane, open as
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
 import { slotStore, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
+import { paneTokens as makePaneTokens } from "./pane-tokens.ts";
 import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
 import * as SharedTerm from "./shared-terminal.ts";
 
@@ -336,6 +337,28 @@ const BRAIN_URL = process.env.HERDR_WEB_BRAIN_URL || "http://127.0.0.1:8099/ui/"
 const BRAIN_ID = "~brain";                        // a path key no herdr pane id can take
 const BRAIN_N = 49;                               // below the pane range (50..89)
 const BRAIN_WS = 6900 + BRAIN_N;
+
+/** This bridge as seen from a process on the same host: what a pane-side program dials. */
+const LOCAL_URL = (() => {
+  const h = !HOST || HOST === "0.0.0.0" || HOST === "::" ? "127.0.0.1" : HOST;
+  return `http://${h.includes(":") ? `[${h}]` : h}:${PORT}`;
+})();
+
+/**
+ * Each pane's own token, for its shared browser and input lock only (see
+ * pane-tokens.ts). Kept in step with the fleet: minted as panes appear,
+ * revoked as they go.
+ */
+const paneTokens = makePaneTokens(LOCAL_URL);
+onFleet((fleet) => paneTokens.sync(fleet.map((f) => f.pane_id)));
+
+/** The routes a pane token opens. Everything else needs a real user. */
+const PANE_SCOPED = new Set(["/api/share", "/api/input-lock", "/api/input-lock/watch"]);
+
+/** The pane a request is scoped to when it came in on a pane token rather than a user's. */
+function paneScope(req: Request): string | null {
+  return whoami(req) ? null : paneTokens.resolve(tokenOf(req));
+}
 
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
 const shareSlots = slotStore();
@@ -1343,7 +1366,9 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         return Response.json({ pane_id: paneId, viewing: (presence.get(paneId)?.size ?? 0) > 0 });
       }
 
-      if (!authed(req)) return Response.json({ error: "unauthorized" }, { status: 401 });
+      if (!authed(req) && !(PANE_SCOPED.has(url.pathname) && paneScope(req))) {
+        return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
 
       if (url.pathname === "/api/sessions") {
 
@@ -1635,6 +1660,8 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       if (url.pathname === "/api/input-lock/watch" && req.method === "GET") {
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        const scope = paneScope(req);
+        if (scope && scope !== paneId) return Response.json({ error: "this token is for another pane" }, { status: 403 });
         try { srv.timeout?.(req, 0); } catch { /* older Bun: the ping still covers it */ }
         const enc = new TextEncoder();
         let off: (() => void) | null = null;
@@ -1658,11 +1685,16 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       if (url.pathname === "/api/input-lock") {
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        const scope = paneScope(req);
+        if (scope && scope !== paneId) return Response.json({ error: "this token is for another pane" }, { status: 403 });
         if (req.method === "GET") return Response.json(InputLock.status(paneId));
         if (req.method !== "POST") return new Response("method not allowed", { status: 405 });
 
         const body = await req.json().catch(() => ({} as any));
-        const owner = body?.owner === "agent" ? "agent" : "user";
+        // A pane token is the program in the pane, which is the agent's side by
+        // definition. It may not act as the user: as "user" it could force the
+        // lock away from the person watching, the one thing force exists to stop.
+        const owner = scope || body?.owner === "agent" ? "agent" : "user";
         const ttl = Number(body?.ttl_ms ?? 30000);
         const act = String(body?.action ?? "claim");
 
@@ -1713,6 +1745,9 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         const paneId = String(b?.pane_id ?? "");
         const action = String(b?.action ?? "");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        const scope = paneScope(req);
+        if (scope && scope !== paneId) return Response.json({ error: "this token is for another pane" }, { status: 403 });
+        if (scope && action.startsWith("brain")) return Response.json({ error: "not with a pane token" }, { status: 403 });
 
         const here = dirname(new URL(import.meta.url).pathname);
         const tools = join(here, "..", "..", "tools");
@@ -1809,6 +1844,20 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
                                    { status: 503 });
             }
             n = got;
+            // Start-or-reuse: a pane whose browser is already up gets it back as
+            // it is, rather than restarted under whoever is using it. Asking for a
+            // particular start (url, geometry, kiosk) or restart:true still restarts.
+            const plain = !b?.url && !b?.geometry && b?.kiosk === undefined && b?.restart !== true;
+            if (plain) {
+              const probe = (port: number) => fetch(`http://127.0.0.1:${port}/json/version`,
+                { signal: AbortSignal.timeout(1500) }).then((r) => r).catch(() => null);
+              const [chrome, gate] = await Promise.all([probe(9300 + n), probe(9400 + n)]);
+              const view = chrome?.ok && gate ? await iframeForPane(paneId) : {};
+              if (view.url) {
+                return Response.json({ ok: true, display: n, iframe_url: view.url,
+                                       cdp_gate_port: 9400 + n, reused: true });
+              }
+            }
           } else {
             const got = shareSlots.peek(paneId)
               ?? (shareSlots.heldByOther(paneId, legacy) ? null : legacy);
@@ -1832,9 +1881,15 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
             process.env.XDG_RUNTIME_DIR || "/tmp",
             `herdr-share-${n}-${Date.now()}.log`,
           );
+          // The gate asks the bridge about the lock with this pane's token, not
+          // whatever user token the bridge was started with: it needs this one
+          // pane's lock and nothing else.
+          const gateEnv = action === "browser"
+            ? { ...env, HERDR_WEB_TOKEN: paneTokens.ensure(paneId), HERDR_WEB_URL: process.env.HERDR_WEB_URL || LOCAL_URL }
+            : env;
           try {
             const proc = Bun.spawn([script, ...args], {
-              env, stdin: "ignore",
+              env: gateEnv, stdin: "ignore",
               stdout: Bun.file(logPath), stderr: Bun.file(logPath),
             });
             const timedOut = Symbol("timeout");

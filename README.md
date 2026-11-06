@@ -320,6 +320,25 @@ its own display slot (`:50`–`:89`, gate port `9400+n`), handed out by the brid
 kept in `$XDG_RUNTIME_DIR/herdr-share-slots.json`; a pane that has closed has its
 display stopped and its slot freed within about two minutes.
 
+**From a program in the pane.** Each pane gets its own token, good only for that
+pane's `/api/share`, `/api/input-lock` and `/api/input-lock/watch`. It is in a file,
+never on a command line:
+
+```
+$XDG_RUNTIME_DIR/herdr-web/panes/<encodeURIComponent($HERDR_PANE_ID)>.json   (0600, dir 0700)
+{"pane_id": "w1:p3", "token": "hwp_…", "url": "http://127.0.0.1:7878"}
+```
+
+Send it as `X-Herdr-Token: <token>`. Then
+`POST <url>/api/share {"pane_id": "<pane>", "action": "browser"}` starts the pane's
+browser, or returns the running one as-is (`"reused": true`) when called with no
+`url`/`geometry`/`kiosk` and no `"restart": true`. The reply carries
+`cdp_gate_port`; drive `127.0.0.1:<cdp_gate_port>` while holding the input lock.
+With a pane token the lock is always taken as `"agent"`, and a token used for
+another pane gets 403. The file goes away when the pane does. On a host where every
+pane runs as one user this keeps panes from reaching each other by accident or
+through the API; it does not stop a program that reads another pane's file.
+
 ### For agents: `tools/mcp-server.ts`
 
 The same thing as MCP tools, so a model reads the rules *before* it acts rather
