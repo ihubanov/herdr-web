@@ -20,6 +20,7 @@ import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPen
 import { detect as detectStream, detectFromPane as detectStreamFromPane, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
+import { slotStore, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
 import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
 import * as SharedTerm from "./shared-terminal.ts";
 
@@ -335,6 +336,43 @@ const BRAIN_URL = process.env.HERDR_WEB_BRAIN_URL || "http://127.0.0.1:8099/ui/"
 const BRAIN_ID = "~brain";                        // a path key no herdr pane id can take
 const BRAIN_N = 49;                               // below the pane range (50..89)
 const BRAIN_WS = 6900 + BRAIN_N;
+
+/** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
+const shareSlots = slotStore();
+/** The display the old hashed numbering gave a pane: only a hint for adopting one it started. */
+function legacySlot(paneId: string): number {
+  return FIRST_SLOT + (Math.abs([...paneId].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 40);
+}
+
+/**
+ * A slot outlives its pane unless something gives it back, and there are only
+ * 40: a pane closed with its browser up would hold one forever. So a pane that
+ * has been gone from the fleet for two sweeps in a row has its browser stopped
+ * and its slot released. Two sweeps, not one, so a fleet refresh that briefly
+ * misses a pane (herdr restarting) does not tear down a live display; and never
+ * on an empty fleet, which is what a failed refresh looks like.
+ */
+const slotGone = new Set<string>();
+setInterval(() => {
+  const fleet = getFleet();
+  if (!fleet.length) return;
+  const live = new Set(fleet.map((f) => f.pane_id));
+  for (const paneId of shareSlots.panes()) {
+    if (live.has(paneId)) { slotGone.delete(paneId); continue; }
+    if (!slotGone.has(paneId)) { slotGone.add(paneId); continue; }
+    slotGone.delete(paneId);
+    const n = shareSlots.peek(paneId);
+    shareSlots.release(paneId);
+    InputLock.forget(paneId);
+    if (n === null) continue;
+    try {
+      const script = join(dirname(new URL(import.meta.url).pathname), "..", "..", "tools", "shared-browser.sh");
+      Bun.spawn([script, "--stop", "--display", String(n), "--port", String(6900 + n)],
+                { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+      console.log(`[share] pane ${paneId} is gone; stopped its display :${n} and freed the slot`);
+    } catch { /* the slot is free either way */ }
+  }
+}, 60_000);
 let brainView: string | null = null;              // the iframe path of the running display
 /**
  * The brain browser is not cheap: the graph is WebGL drawn in software (no GPU), measured at
@@ -1733,9 +1771,24 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
         if (action === "browser" || action === "stop") {
           const script = join(tools, "shared-browser.sh");
-          // Display and port derive from the pane id so two panes never collide,
-          // and so "stop" can find what "browser" started without bookkeeping.
-          const n = 50 + (Math.abs([...paneId].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 40);
+          // The display is the pane's SLOT, handed out by the bridge, so two panes
+          // never share one. The old hash is only a hint: it lets a display started
+          // under that numbering be adopted (start) or found (stop) after an upgrade.
+          const legacy = legacySlot(paneId);
+          let n: number;
+          if (action === "browser") {
+            const got = shareSlots.take(paneId, legacy);
+            if (got === null) {
+              return Response.json({ error: `no free shared-browser slot (${FIRST_SLOT}..${LAST_SLOT} all in use)` },
+                                   { status: 503 });
+            }
+            n = got;
+          } else {
+            const got = shareSlots.peek(paneId)
+              ?? (shareSlots.heldByOther(paneId, legacy) ? null : legacy);
+            if (got === null) return Response.json({ ok: true, stopped: false });
+            n = got;
+          }
           const args = action === "stop"
             // Pass the port on the stop path too. shared-browser.sh no longer
             // needs it to find websockify, but anything else keyed to the port
@@ -1775,6 +1828,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
               return Response.json({ error: out.trim().slice(0, 400) || `exit ${code}` },
                                    { status: 500 });
             }
+            if (action === "stop") shareSlots.release(paneId);
             // The script advertises the display through pane metadata; read it
             // back rather than reconstructing it, so the caller gets exactly the
             // URL the UI would resolve — proxied onto this origin.
