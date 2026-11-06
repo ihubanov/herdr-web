@@ -1629,6 +1629,32 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       // Input arbitration for a shared display. GET reads, POST acts. The owner
       // is taken from the caller's declared side, not inferred: a human clicking
       // "take input" and an agent's driver are different actors on one display.
+      // The same lock as a stream, for the CDP gate: one event now and one per
+      // change, so taking input back cuts an agent off immediately instead of at
+      // the gate's next poll. The ping keeps a quiet stream under Bun's idle cut.
+      if (url.pathname === "/api/input-lock/watch" && req.method === "GET") {
+        const paneId = url.searchParams.get("pane_id");
+        if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        try { srv.timeout?.(req, 0); } catch { /* older Bun: the ping still covers it */ }
+        const enc = new TextEncoder();
+        let off: (() => void) | null = null;
+        let ping: ReturnType<typeof setInterval> | null = null;
+        const end = () => { off?.(); off = null; if (ping) clearInterval(ping); ping = null; };
+        const stream = new ReadableStream({
+          start(c) {
+            const send = (text: string) => { try { c.enqueue(enc.encode(text)); } catch { end(); } };
+            send(`data: ${JSON.stringify(InputLock.status(paneId))}\n\n`);
+            off = InputLock.onChange((p, st) => { if (p === paneId) send(`data: ${JSON.stringify(st)}\n\n`); });
+            ping = setInterval(() => send(": ping\n\n"), 5000);
+            req.signal?.addEventListener("abort", end);
+          },
+          cancel: end,
+        });
+        return new Response(stream, {
+          headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+        });
+      }
+
       if (url.pathname === "/api/input-lock") {
         const paneId = url.searchParams.get("pane_id");
         if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });

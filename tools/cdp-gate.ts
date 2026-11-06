@@ -46,6 +46,54 @@ function pollOnce(): Promise<void> {
   return polling;
 }
 
+/** Take a lock state, from the poll or the push, and act on it. */
+function apply(s: any) {
+  const now = s?.owner === "agent" && (!s.expires || s.expires > Date.now());
+  reason = now ? "ok" : "unheld";
+  if (agentHolds && !now) {
+    // Lost it mid-session: drop everything rather than let an in-flight
+    // command land on a display the human has taken back.
+    for (const sock of live) { try { sock.destroy(); } catch {} }
+    live.clear();
+  }
+  agentHolds = now;
+}
+
+/**
+ * The push half: the bridge streams this pane's lock state on every change, so
+ * a person taking input back cuts the agent off at once rather than at the next
+ * poll — up to POLL_MS during which an in-flight command could still land. The
+ * poll stays as the fallback: if this stream is down, the gate still fails
+ * closed within POLL_MS.
+ */
+async function watch() {
+  for (;;) {
+    try {
+      const u = new URL(`${WEB}/api/input-lock/watch`);
+      u.searchParams.set("pane_id", PANE);
+      if (TOKEN) u.searchParams.set("token", TOKEN);
+      const r = await fetch(u);
+      if (r.ok && r.body) {
+        const dec = new TextDecoder();
+        let buf = "";
+        for await (const chunk of r.body as any as AsyncIterable<Uint8Array>) {
+          buf += dec.decode(chunk, { stream: true });
+          let cut: number;
+          while ((cut = buf.indexOf("\n\n")) !== -1) {
+            const event = buf.slice(0, cut);
+            buf = buf.slice(cut + 2);
+            for (const line of event.split("\n")) {
+              if (!line.startsWith("data:")) continue;
+              try { apply(JSON.parse(line.slice(5))); } catch { /* a bad frame is not a state */ }
+            }
+          }
+        }
+      }
+    } catch { /* bridge down or restarting: the poll covers it */ }
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 async function poll() {
   try {
     const u = new URL(`${WEB}/api/input-lock`);
@@ -59,16 +107,7 @@ async function poll() {
       agentHolds = false; reason = "unauthorized";
       return;
     }
-    const s: any = await r.json();
-    const now = s?.owner === "agent" && (!s.expires || s.expires > Date.now());
-    reason = now ? "ok" : "unheld";
-    if (agentHolds && !now) {
-      // Lost it mid-session: drop everything rather than let an in-flight
-      // command land on a display the human has taken back.
-      for (const sock of live) { try { sock.destroy(); } catch {} }
-      live.clear();
-    }
-    agentHolds = now;
+    apply(await r.json());
   } catch {
     // herdr-web unreachable: fail CLOSED. An ungated debugging port on a display
     // someone may be using is worse than an agent that cannot drive.
@@ -155,3 +194,4 @@ server.listen(LISTEN, "127.0.0.1", () => {
 
 void pollOnce();
 setInterval(() => void pollOnce(), POLL_MS);
+void watch();
