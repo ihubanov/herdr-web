@@ -360,6 +360,22 @@ function paneScope(req: Request): string | null {
   return whoami(req) ? null : paneTokens.resolve(tokenOf(req));
 }
 
+/**
+ * The pane's shared browser if it is up: it holds a slot, Chrome's CDP answers,
+ * the gate answers (any HTTP reply, a 423 included), and the view is advertised.
+ * Looks only; never takes a slot or starts anything.
+ */
+async function runningBrowser(paneId: string): Promise<{ n: number; url: string } | null> {
+  const n = shareSlots.peek(paneId);
+  if (n === null) return null;
+  const probe = (port: number) => fetch(`http://127.0.0.1:${port}/json/version`,
+    { signal: AbortSignal.timeout(1500) }).then((r) => r).catch(() => null);
+  const [chrome, gate] = await Promise.all([probe(9300 + n), probe(9400 + n)]);
+  if (!chrome?.ok || !gate) return null;
+  const view = await iframeForPane(paneId);
+  return view.url ? { n, url: view.url } : null;
+}
+
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
 const shareSlots = slotStore();
 /** The display the old hashed numbering gave a pane: only a hint for adopting one it started. */
@@ -1740,6 +1756,21 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
       // Open something in a pane's embedded view. One endpoint for both the
       // human (the toolbar button) and an agent (MCP, later), so there is a
       // single place where policy, gating and teardown live.
+      // Is this pane's shared browser up? Read-only: it never takes a slot or
+      // starts anything, so a program can ask without causing a browser nobody
+      // opened. "running" is the same test the POST's reuse path uses, so a
+      // running:true here means a following POST action:"browser" reuses it.
+      if (url.pathname === "/api/share" && req.method === "GET") {
+        const paneId = url.searchParams.get("pane_id");
+        if (!paneId) return Response.json({ error: "pane_id required" }, { status: 400 });
+        const scope = paneScope(req);
+        if (scope && scope !== paneId) return Response.json({ error: "this token is for another pane" }, { status: 403 });
+        const up = await runningBrowser(paneId);
+        return Response.json(up
+          ? { running: true, display: up.n, cdp_gate_port: 9400 + up.n, iframe_url: up.url }
+          : { running: false, cdp_gate_port: null });
+      }
+
       if (url.pathname === "/api/share" && req.method === "POST") {
         const b = await req.json().catch(() => ({} as any));
         const paneId = String(b?.pane_id ?? "");
@@ -1849,13 +1880,10 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
             // particular start (url, geometry, kiosk) or restart:true still restarts.
             const plain = !b?.url && !b?.geometry && b?.kiosk === undefined && b?.restart !== true;
             if (plain) {
-              const probe = (port: number) => fetch(`http://127.0.0.1:${port}/json/version`,
-                { signal: AbortSignal.timeout(1500) }).then((r) => r).catch(() => null);
-              const [chrome, gate] = await Promise.all([probe(9300 + n), probe(9400 + n)]);
-              const view = chrome?.ok && gate ? await iframeForPane(paneId) : {};
-              if (view.url) {
-                return Response.json({ ok: true, display: n, iframe_url: view.url,
-                                       cdp_gate_port: 9400 + n, reused: true });
+              const up = await runningBrowser(paneId);
+              if (up) {
+                return Response.json({ ok: true, display: up.n, iframe_url: up.url,
+                                       cdp_gate_port: 9400 + up.n, reused: true });
               }
             }
           } else {

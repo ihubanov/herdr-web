@@ -334,6 +334,10 @@ Send it as `X-Herdr-Token: <token>`. Then
 browser, or returns the running one as-is (`"reused": true`) when called with no
 `url`/`geometry`/`kiosk` and no `"restart": true`. The reply carries
 `cdp_gate_port`; drive `127.0.0.1:<cdp_gate_port>` while holding the input lock.
+`GET <url>/api/share?pane_id=<pane>` only looks: `{"running": true, "display", "cdp_gate_port",
+"iframe_url"}` when the pane's browser is up, else `{"running": false, "cdp_gate_port": null}`.
+It never takes a slot or starts a browser, so a program can check whether the user
+has one open before deciding to use it.
 With a pane token the lock is always taken as `"agent"`, and a token used for
 another pane gets 403. The file goes away when the pane does. On a host where every
 pane runs as one user this keeps panes from reaching each other by accident or
