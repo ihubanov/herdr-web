@@ -142,7 +142,7 @@ const TOOLS: Tool[] = [
     name: "open_shared_browser",
     description:
       "Start a browser that BOTH you and the user can drive, and show it to them.\n" +
-      "It runs in kiosk mode on a virtual display streamed into the user's " +
+      "It runs on a virtual display streamed into the user's " +
       "herdr-web window, so the user watches and can take over; you drive it " +
       "over CDP. Use it when you need a real GUI — a login flow the user must " +
       "complete, a page that needs a human decision, anything you want witnessed.\n" +
@@ -162,8 +162,8 @@ const TOOLS: Tool[] = [
         kiosk: {
           type: "boolean",
           description:
-            "Kiosk (no tabs, no address bar) is the default. Pass false when the " +
-            "USER will need to navigate by hand, since kiosk leaves them no way to.",
+            "Pass true for kiosk (no tabs, no address bar). The default is a normal " +
+            "window, because the user co-drives it and needs to navigate by hand.",
         },
         ...paneArg,
       },
@@ -174,7 +174,7 @@ const TOOLS: Tool[] = [
         pane_id: p, action: "browser",
         ...(a.url ? { url: String(a.url) } : {}),
         ...(a.geometry ? { geometry: String(a.geometry) } : {}),
-        ...(a.kiosk === false ? { kiosk: false } : {}),
+        ...(a.kiosk === true ? { kiosk: true } : {}),
       });
       const cdp = `http://127.0.0.1:${r.cdp_gate_port}`;
       return [
