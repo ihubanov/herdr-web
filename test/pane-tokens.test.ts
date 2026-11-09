@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { paneTokens } from "../src/server/pane-tokens.ts";
+import { paneTokens, runtimeDir } from "../src/server/pane-tokens.ts";
 
 const URL_ = "http://127.0.0.1:7878";
 const freshDir = () => join(mkdtempSync(join(tmpdir(), "ptok-")), "panes");
@@ -55,5 +55,11 @@ describe("paneTokens", () => {
     const again = paneTokens(URL_, dir);
     expect(again.resolve(a)).toBe("w2:p9");
     expect(again.ensure("w2:p9")).toBe(a);
+  });
+
+  test("runtimeDir: XDG_RUNTIME_DIR, else the user's /run/user dir, else /tmp", () => {
+    expect(runtimeDir({ XDG_RUNTIME_DIR: "/x" }, 1000)).toBe("/x");
+    expect(runtimeDir({}, 987654)).toBe("/tmp");
+    expect(runtimeDir({}, undefined)).toBe("/tmp");
   });
 });
