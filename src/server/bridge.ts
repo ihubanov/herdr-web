@@ -1900,7 +1900,10 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
             : ["--display", String(n), "--port", String(6900 + n),
                ...(b?.geometry ? ["--geometry", String(b.geometry)] : []),
                ...(b?.url ? ["--url", String(b.url)] : []),
-               ...(b?.kiosk === false ? ["--no-kiosk"] : [])];
+               // A pane's browser is co-driven: the person needs an address bar and
+               // tabs to navigate by hand. Kiosk only when asked (the brain display
+               // has its own start path and stays kiosk).
+               ...(b?.kiosk === true ? [] : ["--no-kiosk"])];
           // Output goes to a FILE, not a pipe. The script leaves background
           // children running by design, they inherit its stdout, and reading a
           // pipe to EOF therefore waits for a process that never exits — the

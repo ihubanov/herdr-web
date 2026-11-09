@@ -362,7 +362,7 @@ or in `.mcp.json`:
 | tool | what it does |
 | --- | --- |
 | `show_url` | put a page you are already serving in the user's window |
-| `open_shared_browser` | start the kiosk browser and show it; returns the **gate** address |
+| `open_shared_browser` | start the shared browser and show it; returns the **gate** address |
 | `take_input` / `release_input` | the input lock, which the CDP gate enforces |
 | `view_status` | what is being shown, and who holds input |
 | `close_view` | stop showing, and shut the display down |
