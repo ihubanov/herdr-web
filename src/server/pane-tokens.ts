@@ -48,9 +48,9 @@ function eq(a: string, b: string): boolean {
  * looked. So: XDG_RUNTIME_DIR if set, else the user's /run/user/<uid> if it
  * exists, else /tmp.
  */
-export function runtimeDir(env: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string {
+export function runtimeDir(env: NodeJS.ProcessEnv = process.env, uid: number | null = process.getuid?.() ?? null): string {
   if (env.XDG_RUNTIME_DIR) return env.XDG_RUNTIME_DIR;
-  if (uid !== undefined) {
+  if (uid !== null) {
     const run = `/run/user/${uid}`;
     try { if (statSync(run).isDirectory()) return run; } catch { /* no login session dir */ }
   }

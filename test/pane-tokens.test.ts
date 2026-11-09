@@ -60,6 +60,6 @@ describe("paneTokens", () => {
   test("runtimeDir: XDG_RUNTIME_DIR, else the user's /run/user dir, else /tmp", () => {
     expect(runtimeDir({ XDG_RUNTIME_DIR: "/x" }, 1000)).toBe("/x");
     expect(runtimeDir({}, 987654)).toBe("/tmp");
-    expect(runtimeDir({}, undefined)).toBe("/tmp");
+    expect(runtimeDir({}, null)).toBe("/tmp");
   });
 });
