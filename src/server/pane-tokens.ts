@@ -11,6 +11,8 @@
  * Delivery is a file, never the command line: a token typed into the shell
  * lands in scrollback and history. Each pane gets
  *   $XDG_RUNTIME_DIR/herdr-web/panes/<encodeURIComponent(pane_id)>.json   (0600)
+ * ($XDG_RUNTIME_DIR as a pane sees it, /run/user/<uid>, even when the bridge
+ * itself runs without it; see runtimeDir)
  *   {"pane_id": "...", "token": "...", "url": "http://127.0.0.1:7878"}
  * and a program finds it from HERDR_PANE_ID, which herdr already sets in the pane.
  *
@@ -20,7 +22,7 @@
  * people needs separate users or containers.
  */
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export interface PaneTokens {
@@ -39,9 +41,25 @@ function eq(a: string, b: string): boolean {
   return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
+/**
+ * Where the pane files go. Readers run in panes, where a login session sets
+ * XDG_RUNTIME_DIR=/run/user/<uid>; the bridge may run as a system service
+ * where it is unset. Falling back to /tmp there put the files where no pane
+ * looked. So: XDG_RUNTIME_DIR if set, else the user's /run/user/<uid> if it
+ * exists, else /tmp.
+ */
+export function runtimeDir(env: NodeJS.ProcessEnv = process.env, uid: number | null = process.getuid?.() ?? null): string {
+  if (env.XDG_RUNTIME_DIR) return env.XDG_RUNTIME_DIR;
+  if (uid !== null) {
+    const run = `/run/user/${uid}`;
+    try { if (statSync(run).isDirectory()) return run; } catch { /* no login session dir */ }
+  }
+  return "/tmp";
+}
+
 export function paneTokens(
   url: string,
-  dir = join(process.env.XDG_RUNTIME_DIR || "/tmp", "herdr-web", "panes"),
+  dir = join(runtimeDir(), "herdr-web", "panes"),
 ): PaneTokens {
   const byPane = new Map<string, string>();
   const fileFor = (paneId: string) => join(dir, `${encodeURIComponent(paneId)}.json`);
