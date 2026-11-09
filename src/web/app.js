@@ -961,7 +961,17 @@ window.addEventListener("pagehide", () => {
   }
 });
 el.frameopen.onclick = () => {
-  if (capability?.iframe) window.open(capability.iframe.url, "_blank", "noopener,noreferrer");
+  const url = capability?.iframe?.url;
+  if (!url) return;
+  if (!url.startsWith("/shared/")) { window.open(url, "_blank", "noopener,noreferrer"); return; }
+  // Popping out MOVES the display to its own tab: the embedded view closes, so
+  // two viewers do not show one screen, and the tab takes input as the user —
+  // that is what popping out is for. The tab has no parent to tell it the lock
+  // state, so claim=1 makes it claim and hold the lock itself. No token in this
+  // URL: unlike the iframe's, it sits in an address bar and in history. The tab
+  // is same-origin and rides the session cookie, as the old pop-out did.
+  window.open(`${url}${url.includes("?") ? "&" : "?"}claim=1`, "_blank", "noopener,noreferrer");
+  dismissFrame();
 };
 
 /** Button visibility and label track the pane's capability and current view. */
