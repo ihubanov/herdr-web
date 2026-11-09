@@ -18,6 +18,10 @@
   #err{position:absolute;inset:0;display:none;align-items:center;justify-content:center;
     padding:20px;text-align:center;color:#f7768e}
   #err.on{display:flex}
+  #tag button,#giveback{font:inherit;font-size:11px;padding:2px 8px;margin-left:6px;border-radius:4px;
+    cursor:pointer;background:#1b1f28;color:#c8ccd4;border:1px solid #2a2f3a;pointer-events:auto}
+  #giveback{position:absolute;right:8px;top:8px;z-index:7;opacity:.75}
+  #giveback:hover{opacity:1}
 </style>
 <div id="screen"></div>
 <div id="veil"></div>
@@ -44,6 +48,12 @@ const tag = document.getElementById('tag');
 const errEl = document.getElementById('err');
 
 let rfb = null;
+// Not framed: popped out, or opened directly. Then nobody posts the lock state
+// in, and this page talks to the lock API itself (see "standalone" below).
+const standalone = window.parent === window;
+const sharedPane = location.pathname.match(/^\/shared\/([^/]+)\//);
+const lockUrl = sharedPane ? `/api/input-lock?pane_id=${sharedPane[1]}` : null;
+let giveBack = null;
 // Start LOCKED. If the parent never speaks — an old herdr-web, a direct visit —
 // the safe default is a display you can watch but not disturb, because the
 // agent may well be mid-action on it.
@@ -62,8 +72,13 @@ function setLock(state) {
     const who = state && state.owner === 'agent'
       ? `<b>the agent</b> is driving`
       : `input is <b>not claimed</b>`;
-    tag.innerHTML = `${who} — you are watching. Take input from the herdr-web toolbar to interact.`;
+    tag.innerHTML = standalone
+      ? `${who} — you are watching. <button id="take">take input</button>`
+      : `${who} — you are watching. Take input from the herdr-web toolbar to interact.`;
+    const take = document.getElementById('take');
+    if (take) take.onclick = () => { void claim(); };
   }
+  if (giveBack) giveBack.style.display = standalone && mine ? '' : 'none';
   paint();
 }
 
@@ -152,5 +167,54 @@ window.addEventListener('message', (ev) => {
 // Announce readiness so the parent sends the current state without waiting for
 // its next poll — otherwise a reload sits inert for a full interval.
 try { parent.postMessage({ kind: 'herdr-shim-ready' }, '*'); } catch { /* no parent */ }
+
+/* --------------------------------------------------------------- standalone
+ * Popped out into its own tab, there is no parent to own the lock, so this page
+ * does the parent's job itself: read the lock, offer take / give back, renew a
+ * lock it holds, and release it when the tab goes. Served through the bridge it
+ * is same-origin with the API, so the viewer's session cookie authenticates it. Straight off websockify there is no API to ask, and it stays
+ * a watch-only view.
+ */
+async function claim() {
+  const r = await lockCall({ owner: 'user', action: 'claim', ttl_ms: 30000, force: true });
+  if (r && r.state) setLock(r.state);
+}
+async function lockCall(body) {
+  if (!lockUrl) return null;
+  try {
+    const r = await fetch(lockUrl, body
+      ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+      : {});
+    if (!r.ok && r.status !== 409) return null;
+    return await r.json();
+  } catch { return null; }
+}
+if (standalone && lockUrl) {
+  giveBack = document.createElement('button');
+  giveBack.id = 'giveback';
+  giveBack.textContent = 'give input back';
+  giveBack.style.display = 'none';
+  giveBack.onclick = async () => {
+    const r = await lockCall({ owner: 'user', action: 'release' });
+    setLock(r && r.state ? r.state : null);
+  };
+  document.body.appendChild(giveBack);
+  const tick = async () => {
+    if (iHaveInput) {
+      const r = await lockCall({ owner: 'user', action: 'heartbeat', ttl_ms: 30000 });
+      if (r && r.state) setLock(r.state);
+    } else {
+      const s = await lockCall(null);
+      if (s) setLock(s);
+    }
+  };
+  if (qs.get('claim') === '1') void claim(); else void tick();
+  setInterval(tick, 5000);
+  window.addEventListener('pagehide', () => {
+    if (!iHaveInput) return;
+    navigator.sendBeacon?.(lockUrl, new Blob([JSON.stringify({ owner: 'user', action: 'release' })],
+                                              { type: 'application/json' }));
+  });
+}
 paint();
 </script>
