@@ -1352,16 +1352,37 @@ async function newSession(wsId) {
 
 function newSpace() {
   const ref = fleet[0];
+  // A new space comes with a root pane, and that pane is its first session: it
+  // gets the same launch as "new session" does, or it opens as a bare shell.
+  const base = (me?.defaultLaunchCmd || "").trim();
+  const locked = !!me?.lockLaunch && !!base;
+  const cmdFields = locked
+    ? [
+        { k: "cmd", label: "launch command", type: "static", value: base },
+        { k: "skip", label: "--dangerously-skip-permissions", type: "checkbox", value: false },
+      ]
+    : [
+        { k: "cmd", label: "launch command (optional)", value: base,
+          placeholder: "leave blank for a shell" },
+      ];
   openModal({
     title: "New space",
     sub: "A workspace groups related sessions.",
     fields: [
       { k: "label", label: "name", value: "", placeholder: "e.g. Payments" },
       { k: "cwd", label: "working directory", value: ref?.cwd || "", placeholder: "/path/to/repo" },
+      ...cmdFields,
     ],
     onOK: async (v) => {
       if (!v.label) throw new Error("name is required");
-      await rpc("workspace.create", { label: v.label, cwd: v.cwd || null, focus: false });
+      const res = await rpc("workspace.create", { label: v.label, cwd: v.cwd || null, focus: false });
+      let cmd = locked ? base : (v.cmd || "").trim();
+      if (locked && v.skip) cmd += " --dangerously-skip-permissions";
+      if (!cmd) return;
+      const paneId = res?.root_pane?.pane_id;
+      if (!paneId) return;
+      await new Promise((r) => setTimeout(r, 1500));   // let the shell come up
+      await rpc("pane.send_input", { pane_id: paneId, text: cmd, keys: ["enter"] });
     },
   });
 }
