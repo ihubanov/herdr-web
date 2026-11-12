@@ -22,6 +22,7 @@ import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type Tr
 import * as InputLock from "./input-lock.ts";
 import { slotStore, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
 import { paneTokens as makePaneTokens } from "./pane-tokens.ts";
+import { gcRepo, processCwds } from "./worktree-gc.ts";
 import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
 import * as SharedTerm from "./shared-terminal.ts";
 
@@ -412,6 +413,55 @@ setInterval(() => {
     } catch { /* the slot is free either way */ }
   }
 }, 60_000);
+/**
+ * Worktree GC (see worktree-gc.ts for the safety contract). herdr never removes
+ * a pane's worktree, so this sweeps the repos the fleet's panes are in and
+ * removes worktrees whose work is already in main. dry-run (the default) only
+ * logs what it would remove; "on" removes; "off" does not run.
+ *
+ * A repo is learned from a live pane's cwd and remembered, so a worktree is
+ * still found after the pane that made it has closed.
+ */
+const GC_MODE = (() => {
+  const v = (process.env.HERDR_WEB_WORKTREE_GC || "dry-run").trim().toLowerCase();
+  return v === "on" || v === "off" ? v : "dry-run";
+})();
+const GC_EVERY_MS = Math.max(1, Number(process.env.HERDR_WEB_WORKTREE_GC_HOURS) || 6) * 3600_000;
+const GC_MIN_IDLE_MS = Math.max(1, Number(process.env.HERDR_WEB_WORKTREE_GC_MIN_IDLE_HOURS) || 24) * 3600_000;
+const gcRepos = new Set<string>();
+let gcRunning = false;
+async function worktreeSweep() {
+  const fleet = getFleet();
+  if (gcRunning || !fleet.length) return;
+  gcRunning = true;
+  try {
+    const paneCwds = [...new Set(fleet.map((f) => f.cwd).filter(Boolean))];
+    for (const cwd of paneCwds) {
+      try {
+        const src = (await call("worktree.list", { cwd }))?.source?.source_checkout_path;
+        if (typeof src === "string" && src) gcRepos.add(src);
+      } catch { /* not a repo, or herdr busy: next sweep */ }
+    }
+    // Without /proc nothing says which worktrees are in use, so nothing is judged idle.
+    const procs = processCwds();
+    if (procs === null) { console.log("[worktree-gc] cannot read /proc; skipping"); return; }
+    const live = [...procs, ...paneCwds];
+    for (const repo of gcRepos) {
+      if (!existsSync(repo)) { gcRepos.delete(repo); continue; }
+      const acts = await gcRepo(repo, {
+        dryRun: GC_MODE !== "on", live, uid: process.getuid?.() ?? null, minIdleMs: GC_MIN_IDLE_MS,
+      });
+      for (const a of acts) {
+        if (a.action !== "kept") console.log(`[worktree-gc] ${a.action} ${a.path} (${a.branch}): ${a.reason}`);
+      }
+    }
+  } finally { gcRunning = false; }
+}
+if (GC_MODE !== "off") {
+  setTimeout(() => void worktreeSweep(), 5 * 60_000);
+  setInterval(() => void worktreeSweep(), GC_EVERY_MS);
+}
+
 let brainView: string | null = null;              // the iframe path of the running display
 /**
  * The brain browser is not cheap: the graph is WebGL drawn in software (no GPU), measured at
