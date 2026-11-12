@@ -146,6 +146,32 @@ ordinary text in the agent's own rendering — the bridge receives a grid of
 characters, not a list of messages, so it cannot attach a badge to one. That is
 what the chat view below is for.
 
+### Cleaning up worktrees
+
+herdr makes a git worktree per pane or space and never removes it when the
+pane closes, so on a busy host they pile up. herdr-web sweeps the repos its
+panes are in and removes worktrees whose work is already in main:
+
+- only the checkout directory goes; branches are never deleted;
+- `git worktree remove` without `--force`, so git refuses any worktree with
+  modified or untracked files;
+- only a worktree whose HEAD is merged into main, or whose branch was
+  squash-merged (merging it into main changes nothing);
+- kept regardless: the main checkout, locked worktrees, `*-main-ro` mirrors,
+  a worktree with a `.herdr-keep` file in its root, one a process or pane is
+  in, one touched in the last day, and one owned by another user (the bridge
+  can only see its own user's processes, so it cannot tell whether someone
+  else's worktree is in use).
+
+It starts in dry-run: every sweep logs `[worktree-gc] would-remove …` and
+changes nothing until you turn it on.
+
+```bash
+HERDR_WEB_WORKTREE_GC=dry-run | on | off    # default: dry-run (log only)
+HERDR_WEB_WORKTREE_GC_HOURS=6               # how often it sweeps
+HERDR_WEB_WORKTREE_GC_MIN_IDLE_HOURS=24     # untouched for at least this long
+```
+
 ## Conformance
 
 `tools/handshake.ts` points this repo's client at another party's
