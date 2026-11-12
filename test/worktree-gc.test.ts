@@ -21,10 +21,10 @@ function repo() {
     git(r, "worktree", "add", "-q", "-b", branch, p);
     return p;
   };
-  const commit = (cwd: string, file: string, body: string) => {
+  const commit = (cwd: string, file: string, body: string, msg = file) => {
     writeFileSync(join(cwd, file), body);
     git(cwd, "add", file);
-    git(cwd, "commit", "-qm", file);
+    git(cwd, "commit", "-qm", msg);
   };
   return { root, r, wt, commit };
 }
@@ -57,7 +57,9 @@ describe("gcRepo", () => {
     const { r, wt, commit } = repo();
     const p = wt("sq");
     commit(p, "b.txt", "b\n");
-    commit(r, "b.txt", "b\n"); // the same change, landed on main as a different commit
+    // The same change landed on main as a different commit. The message differs
+    // so it cannot hash to the very same commit, which would read as merged.
+    commit(r, "b.txt", "b\n", "squashed: sq");
     expect(act(await gcRepo(r, opts()), p)).toMatchObject({ action: "removed", reason: "squash-merged" });
   });
 
