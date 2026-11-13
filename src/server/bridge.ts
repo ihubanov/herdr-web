@@ -22,7 +22,7 @@ import { detect as detectStream, detectFromPane as detectStreamFromPane, open as
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
 import { slotStore, displayBusy, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
-import { loadViews } from "./views.ts";
+import { loadViews, type View } from "./views.ts";
 import { paneTokens as makePaneTokens } from "./pane-tokens.ts";
 import { gcRepo, processCwds } from "./worktree-gc.ts";
 import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
@@ -395,6 +395,19 @@ if (VIEWS.views.length) console.log(`[views] ${VIEWS.views.map((v) => v.id).join
 /** Where noVNC's modules are, for the viewer a vnc view is shown in. */
 const NOVNC_ROOT = (process.env.NOVNC_ROOT || "/usr/share/novnc").replace(/\/$/, "");
 const SHIM_PAGE = new URL("../../tools/novnc-shim/index.html", import.meta.url).pathname;
+
+/** Whether a view answers. A url view is not probed: the browser loads it, not us. */
+async function viewStatus(v: View) {
+  if (v.kind !== "vnc") return { id: v.id, kind: v.kind, reachable: true };
+  const reachable = await new Promise<boolean>((done) => {
+    const s = tcpConnect(v.port, v.host);
+    const end = (ok: boolean) => { s.destroy(); done(ok); };
+    s.setTimeout(1500, () => end(false));
+    s.on("connect", () => end(true));
+    s.on("error", () => end(false));
+  });
+  return { id: v.id, kind: v.kind, reachable, iframe_url: `/views/${encodeURIComponent(v.id)}/?input=free` };
+}
 
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
 const shareSlots = slotStore(undefined, (n) => VIEWS.reserved.has(n) || displayBusy(n));
@@ -1532,18 +1545,13 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
       // Does a vnc view's server answer? The frame says "not reachable" instead
       // of an empty viewer when it does not.
+      // With no id, every view at once.
       if (url.pathname === "/api/views/status") {
-        const v = VIEWS.views.find((x) => x.id === url.searchParams.get("id"));
+        const id = url.searchParams.get("id");
+        if (id === null) return Response.json({ views: await Promise.all(VIEWS.views.map(viewStatus)) });
+        const v = VIEWS.views.find((x) => x.id === id);
         if (!v) return Response.json({ error: "no such view" }, { status: 404 });
-        if (v.kind !== "vnc") return Response.json({ id: v.id, reachable: true });
-        const reachable = await new Promise<boolean>((done) => {
-          const s = tcpConnect(v.port, v.host);
-          const end = (ok: boolean) => { s.destroy(); done(ok); };
-          s.setTimeout(1500, () => end(false));
-          s.on("connect", () => end(true));
-          s.on("error", () => end(false));
-        });
-        return Response.json({ id: v.id, reachable, iframe_url: `/views/${encodeURIComponent(v.id)}/?input=free` });
+        return Response.json(await viewStatus(v));
       }
 
       if (url.pathname === "/api/sessions") {
