@@ -359,7 +359,8 @@ Send it as `X-Herdr-Token: <token>`. Then
 `POST <url>/api/share {"pane_id": "<pane>", "action": "browser"}` starts the pane's
 browser, or returns the running one as-is (`"reused": true`) when called with no
 `url`/`geometry`/`kiosk` and no `"restart": true`. The reply carries
-`cdp_gate_port`; drive `127.0.0.1:<cdp_gate_port>` while holding the input lock.
+`cdp_gate_port` and `cdp_mode`; drive `127.0.0.1:<cdp_gate_port>` (in `exclusive`
+mode, only while holding the input lock).
 `GET <url>/api/share?pane_id=<pane>` only looks: `{"running": true, "display", "cdp_gate_port",
 "iframe_url"}` when the pane's browser is up, else `{"running": false, "cdp_gate_port": null}`.
 It never takes a slot or starts a browser, so a program can check whether the user
@@ -389,7 +390,7 @@ or in `.mcp.json`:
 | --- | --- |
 | `show_url` | put a page you are already serving in the user's window |
 | `open_shared_browser` | start the shared browser and show it; returns the **gate** address |
-| `take_input` / `release_input` | the input lock, which the CDP gate enforces |
+| `take_input` / `release_input` | the input lock: shown to the user, and enforced by the CDP gate in exclusive mode |
 | `view_status` | what is being shown, and who holds input |
 | `close_view` | stop showing, and shut the display down |
 
@@ -408,15 +409,29 @@ protocol error, so the model can read "only loopback URLs allowed" and adapt
 instead of seeing a broken tool.
 
 `open_shared_browser` hands back the CDP **gate** port, never the browser's own
-debugging port. That is the whole point of the gate: an agent that ignores the
-input lock cannot connect at all, rather than being asked nicely not to.
+debugging port. What the gate does with the input lock depends on the mode:
+
+```bash
+HERDR_WEB_CDP_MODE=co-drive | exclusive    # default: co-drive
+```
+
+- **co-drive** (default): the agent works beside the user. The lock still shows
+  who is driving, in the UI and the API, but it blocks no one. The user taking
+  input does not cut the agent off, and the agent can connect without holding
+  it. An agent such as Squire watches what the user does and works in parallel.
+- **exclusive**: an agent that does not hold the lock cannot connect at all, and
+  its open connections are dropped the moment the user takes input.
+
+A gate keeps the mode it was started with, so a change applies to browsers
+started after it (`"restart": true`, or close and reopen).
 
 The gate answers a refused connection with **HTTP 423 Locked** and a JSON body
-naming the reason (`unheld`, `unauthorized`, `unreachable`) — a diagnosable
-refusal rather than a reset the driver would report as "Chrome is not running".
-It re-reads the lock on every new connection, in both directions, so claim then
-connect needs no wait, and a release is honoured immediately rather than up to a
-poll interval later.
+naming the reason (`unheld` in exclusive mode; `unauthorized` or `unreachable` in
+either, since a gate that cannot check its token must not leave the debugging
+port open) — a diagnosable refusal rather than a reset the driver would report as
+"Chrome is not running". It re-reads the lock on every new connection, in both
+directions, so claim then connect needs no wait, and a release is honoured
+immediately rather than up to a poll interval later.
 
 ## Chat view
 

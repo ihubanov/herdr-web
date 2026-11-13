@@ -6,8 +6,8 @@
  * shell scripts beside this file. The reason to also speak MCP is that a tool
  * DESCRIPTION is read before the tool is used, while a shell script's help is
  * read only after someone thinks to run it — so the rules that actually matter
- * (a browser on the real desktop cannot be shown; the CDP gate refuses until
- * you hold the input lock) arrive before the mistake instead of after it.
+ * (a browser on the real desktop cannot be shown; how the input lock applies)
+ * arrive before the mistake instead of after it.
  *
  * Everything here delegates to the HTTP API. No display arithmetic, no pane
  * tokens, no process management lives in this file — that was the drift that
@@ -146,9 +146,12 @@ const TOOLS: Tool[] = [
       "herdr-web window, so the user watches and can take over; you drive it " +
       "over CDP. Use it when you need a real GUI — a login flow the user must " +
       "complete, a page that needs a human decision, anything you want witnessed.\n" +
-      "You cannot drive it until you hold the input lock: the CDP gate refuses " +
-      "to forward otherwise, so call take_input first. Connect to the returned " +
-      "cdp_url, never to the browser's own debugging port.\n" +
+      "The user can take input at any time. In co-drive mode (the default) " +
+      "that does not stop you: keep working beside them, and use take_input " +
+      "so they can see when you are driving. In exclusive mode the CDP gate " +
+      "refuses you until you hold the input lock. The result says which mode " +
+      "applies. Connect to the returned cdp_url, never to the browser's own " +
+      "debugging port.\n" +
       "Starting it again on the same pane restarts it, it does not stack.\n" +
       "The display CANNOT BE RESIZED once running: a CDP resize or a larger " +
       "viewport will report success and change nothing, because the virtual " +
@@ -177,12 +180,17 @@ const TOOLS: Tool[] = [
         ...(a.kiosk === true ? { kiosk: true } : {}),
       });
       const cdp = `http://127.0.0.1:${r.cdp_gate_port}`;
+      const exclusive = r.cdp_mode === "exclusive";
       return [
-        `Started on display :${r.display} and shown to the user.`,
-        `cdp_url: ${cdp}   (the gate — it refuses until you hold the input lock)`,
+        `${r.reused ? "Already running" : "Started"} on display :${r.display} and shown to the user.`,
+        exclusive
+          ? `cdp_url: ${cdp}   (the gate — exclusive mode: it refuses until you hold the input lock)`
+          : `cdp_url: ${cdp}   (the gate — co-drive mode: you keep working while the user drives too)`,
         `display: :${r.display}   (for X tools; the same arbitration does not apply there)`,
         r.iframe_rejected ? `NOTE: the user cannot see it — ${r.iframe_rejected}` : "",
-        `Take the lock with take_input before driving, and release_input when done.`,
+        exclusive
+          ? `Take the lock with take_input before driving, and release_input when done.`
+          : `take_input while you drive so the user sees it, and release_input when done.`,
       ].filter(Boolean).join("\n");
     },
   },
@@ -190,12 +198,14 @@ const TOOLS: Tool[] = [
   {
     name: "take_input",
     description:
-      "Claim the input lock on this pane's shared display, so you may drive it.\n" +
-      "The lock is not advisory: the CDP gate refuses to forward while you do " +
-      "not hold it. It EXPIRES — renew it by calling this again during long " +
-      "work, or the user gets the display back mid-task.\n" +
-      "A claim fails while the user holds it. That is deliberate; wait, or ask " +
-      "them in chat. You cannot force it.",
+      "Claim the input lock on this pane's shared display: it tells the user " +
+      "you are driving.\n" +
+      "In co-drive mode (the default) the lock is shown but does not block: " +
+      "the CDP gate lets you drive whether or not you hold it. In exclusive " +
+      "mode it refuses to forward while you do not hold it. It EXPIRES — renew " +
+      "it by calling this again during long work.\n" +
+      "A claim fails while the user holds it. You cannot force it; in co-drive " +
+      "keep working, in exclusive mode wait or ask them in chat.",
     inputSchema: {
       type: "object",
       properties: {
@@ -220,7 +230,8 @@ const TOOLS: Tool[] = [
       } catch (e: any) {
         // A refused claim is an ordinary outcome here, not a failure to report
         // as a broken tool: somebody else is driving.
-        return `Refused — ${e?.message ?? e}. The user is driving; wait or ask them.`;
+        return `Refused — ${e?.message ?? e}. The user is driving. In co-drive mode ` +
+               `you can keep working beside them; in exclusive mode wait or ask them.`;
       }
     },
   },
@@ -228,13 +239,13 @@ const TOOLS: Tool[] = [
   {
     name: "release_input",
     description:
-      "Give the input lock back. Do this as soon as you stop driving: until you " +
-      "do, the user is watching a display they cannot touch.",
+      "Give the input lock back. Do this as soon as you stop driving, so the " +
+      "user does not see you as driving when you are not.",
     inputSchema: { type: "object", properties: { ...paneArg } },
     async run(a) {
       const p = pane(a.pane_id);
       await post(`/api/input-lock?pane_id=${encodeURIComponent(p)}`, { action: "release", owner: "agent" });
-      return "Released. The user can drive the display again.";
+      return "Released.";
     },
   },
 

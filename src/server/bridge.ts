@@ -377,6 +377,15 @@ async function runningBrowser(paneId: string): Promise<{ n: number; url: string 
   return view.url ? { n, url: view.url } : null;
 }
 
+/**
+ * Whether the user holding input shuts the agent out of the shared browser.
+ * co-drive (default): no, the lock is shown but does not block, so an agent can
+ * keep working beside the user. exclusive: the CDP gate refuses the agent
+ * unless it holds the lock. See tools/cdp-gate.ts. A gate keeps the mode it was
+ * started with, so a change applies to browsers started after it.
+ */
+const CDP_MODE = (process.env.HERDR_WEB_CDP_MODE || "").trim().toLowerCase() === "exclusive" ? "exclusive" : "co-drive";
+
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
 const shareSlots = slotStore();
 /** The display the old hashed numbering gave a pane: only a hint for adopting one it started. */
@@ -1557,6 +1566,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           canDestroy: u.isAdmin, canClose: !u.guest, adminOnly: [...ADMIN_ONLY],
           defaultLaunchCmd: DEFAULT_LAUNCH_CMD,
           lockLaunch: LOCK_LAUNCH,
+          cdpMode: CDP_MODE,
           agentName: AGENT_NAME,
           altUiUrl: ALT_UI_URL || null,
           altUiLabel: ALT_UI_LABEL,
@@ -1817,7 +1827,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
         if (scope && scope !== paneId) return Response.json({ error: "this token is for another pane" }, { status: 403 });
         const up = await runningBrowser(paneId);
         return Response.json(up
-          ? { running: true, display: up.n, cdp_gate_port: 9400 + up.n, iframe_url: up.url }
+          ? { running: true, display: up.n, cdp_gate_port: 9400 + up.n, cdp_mode: CDP_MODE, iframe_url: up.url }
           : { running: false, cdp_gate_port: null });
       }
 
@@ -1933,7 +1943,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
               const up = await runningBrowser(paneId);
               if (up) {
                 return Response.json({ ok: true, display: up.n, iframe_url: up.url,
-                                       cdp_gate_port: 9400 + up.n, reused: true });
+                                       cdp_gate_port: 9400 + up.n, cdp_mode: CDP_MODE, reused: true });
               }
             }
           } else {
@@ -1966,7 +1976,8 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           // whatever user token the bridge was started with: it needs this one
           // pane's lock and nothing else.
           const gateEnv = action === "browser"
-            ? { ...env, HERDR_WEB_TOKEN: paneTokens.ensure(paneId), HERDR_WEB_URL: process.env.HERDR_WEB_URL || LOCAL_URL }
+            ? { ...env, HERDR_WEB_TOKEN: paneTokens.ensure(paneId), HERDR_WEB_URL: process.env.HERDR_WEB_URL || LOCAL_URL,
+                HERDR_WEB_CDP_MODE: CDP_MODE }
             : env;
           try {
             const proc = Bun.spawn([script, ...args], {
@@ -2002,6 +2013,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
               // The GATE port, never the raw CDP port: handing out 9300+n would
               // let an agent drive the display without holding the input lock.
               cdp_gate_port: action === "browser" ? 9400 + n : undefined,
+              cdp_mode: action === "browser" ? CDP_MODE : undefined,
               output: out.trim().slice(0, 600),
             });
           } catch (e: any) {

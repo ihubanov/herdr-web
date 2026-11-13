@@ -872,9 +872,10 @@ function renderLock() {
     : theirs ? `input: agent${s.label ? ` (${s.label})` : ""}`
     : "input: free";
   el.locktake.style.display = mine ? "none" : "";
-  // Taking it from a working agent is a real interruption, so say so on the
-  // button rather than springing it after the click.
-  el.locktake.textContent = theirs ? "take input from agent" : "take input";
+  // In exclusive mode taking it from a working agent is a real interruption, so
+  // say so on the button rather than springing it after the click. In co-drive
+  // (the default) the agent keeps working beside you, so there is nothing to warn of.
+  el.locktake.textContent = theirs && me?.cdpMode === "exclusive" ? "take input from agent" : "take input";
   el.lockrelease.style.display = mine ? "" : "none";
   pushLockToFrame();
 }
