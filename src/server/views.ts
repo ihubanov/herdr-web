@@ -9,7 +9,7 @@
  * behind the port, so a view outlives every pane and every bridge restart.
  *
  *   HERDR_WEB_VIEWS=/path/views.json
- *   [{ "id": "android", "label": "Android", "vnc": "127.0.0.1:5987" },
+ *   [{ "id": "android", "label": "Android", "vnc": "127.0.0.1:5987", "resize": "scale" },
  *    { "id": "docs", "label": "Docs", "url": "http://127.0.0.1:8080/" }]
  *
  * or { "views": [...], "reserve": [87] }. A display number a view uses is kept
@@ -19,7 +19,10 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
-export interface VncView { id: string; label: string; icon?: string; kind: "vnc"; host: string; port: number }
+/** How the viewer fits a vnc view's screen: scale the picture (the default),
+ *  ask the server to resize its screen to the frame, or neither. */
+export type ResizeMode = "scale" | "remote" | "none";
+export interface VncView { id: string; label: string; icon?: string; kind: "vnc"; host: string; port: number; resize: ResizeMode }
 export interface UrlView { id: string; label: string; icon?: string; kind: "url"; url: string }
 export type View = VncView | UrlView;
 export interface ViewsConfig { views: View[]; reserved: Set<number>; errors: string[] }
@@ -62,7 +65,14 @@ export function parseViews(raw: unknown): ViewsConfig {
     if (hasVnc) {
       const hp = hostPort(e.vnc);
       if (!hp) { out.errors.push(`${where}: vnc must be host:port`); continue; }
-      out.views.push({ id: e.id, label, icon, kind: "vnc", ...hp });
+      // Scale by default: the server behind a view is not ours, and its screen
+      // is usually a fixed size (a phone) that must not be resized to the frame.
+      let resize: ResizeMode = "scale";
+      if (e.resize !== undefined) {
+        if (e.resize === "scale" || e.resize === "remote" || e.resize === "none") resize = e.resize;
+        else out.errors.push(`${where}: resize must be "scale", "remote" or "none"; using "scale"`);
+      }
+      out.views.push({ id: e.id, label, icon, kind: "vnc", ...hp, resize });
       if (LOOPBACK.has(hp.host) && hp.port >= 5900 && hp.port <= 5999) out.reserved.add(hp.port - 5900);
     } else {
       let u: URL;

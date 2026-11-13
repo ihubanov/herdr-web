@@ -584,6 +584,31 @@ function renderViewButtons() {
   box.classList.toggle("on", !!(me?.views?.length && el.framebtn.style.display !== "none"));
 }
 
+/**
+ * Shape the window to a view's remote screen: its aspect ratio, as large as
+ * fits, centred, and never past 1:1 so the picture is not blown up. Only for a
+ * view that scales (or does not resize); one that resizes the server's screen
+ * to the window follows the window instead.
+ */
+window.addEventListener("message", (ev) => {
+  if (ev.data?.kind !== "herdr-fb-size" || ev.source !== el.frame.contentWindow) return;
+  const v = frameView && me?.views?.find((x) => x.id === frameView);
+  if (!v || v.kind !== "vnc" || v.resize === "remote") return;
+  fitFrame(Number(ev.data.width), Number(ev.data.height));
+});
+
+function fitFrame(fw, fh) {
+  if (!(fw > 0 && fh > 0)) return;
+  const host = el.frameview.offsetParent || document.body;
+  const W = host.clientWidth || window.innerWidth;
+  const H = host.clientHeight || window.innerHeight;
+  const bar = $("framebar").offsetHeight || 0;
+  const s = Math.min(1, (W * 0.95) / fw, (H * 0.95 - bar) / fh);
+  const w = Math.round(fw * s), h = Math.round(fh * s) + bar;
+  el.frameview.classList.remove("max");
+  place(Math.round((W - w) / 2), Math.round((H - h) / 2), w, h);
+}
+
 async function openView(v, b) {
   if (frameOpen && frameView === v.id) { dismissFrame(); return; }
   if (v.kind === "url") { openFrame(v.url, v); return; }

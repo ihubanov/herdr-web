@@ -406,7 +406,7 @@ async function viewStatus(v: View) {
     s.on("connect", () => end(true));
     s.on("error", () => end(false));
   });
-  return { id: v.id, kind: v.kind, reachable, iframe_url: `/views/${encodeURIComponent(v.id)}/?input=free` };
+  return { id: v.id, kind: v.kind, reachable, iframe_url: `/views/${encodeURIComponent(v.id)}/?input=free&resize=${v.resize}` };
 }
 
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
@@ -1679,7 +1679,7 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           // A url view refused by the iframe policy is still listed, with the
           // reason, so its button can say why instead of vanishing.
           views: VIEWS.views.map((v) => {
-            if (v.kind === "vnc") return { id: v.id, label: v.label, icon: v.icon, kind: "vnc" };
+            if (v.kind === "vnc") return { id: v.id, label: v.label, icon: v.icon, kind: "vnc", resize: v.resize };
             const ok = iframeUrlAllowed(v.url, IFRAME_POLICY, PORT);
             return { id: v.id, label: v.label, icon: v.icon, kind: "url",
                      url: ok.ok ? ok.url : null, rejected: ok.ok ? null : ok.reason };

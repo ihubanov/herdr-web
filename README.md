@@ -394,7 +394,11 @@ digits, dashes), a `label`, an optional `icon`, and exactly one of:
   viewer and relays to that port, behind the same sign-in as the pane displays,
   so nothing else (no websockify) is needed in front of it. It needs noVNC's
   files on the host (`/usr/share/novnc`, or `NOVNC_ROOT`). Whoever opens the view
-  has input: there is no input lock on it. If the port does not answer, the
+  has input: there is no input lock on it. Optional `"resize"`: `scale` (default)
+  fits the picture to the window, `remote` asks the server to resize its screen
+  to the window, `none` shows it 1:1. With `scale` or `none` the window takes
+  the remote screen's shape, as large as fits and never past its real size. If
+  the port does not answer, the
   button says "not reachable". `GET /api/views/status?id=<id>` probes one view;
   without `id` it lists every view with `reachable`.
 - **`url`**: a page loaded in the frame, under the `HERDR_WEB_IFRAMES` policy below
