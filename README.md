@@ -370,6 +370,44 @@ another pane gets 403. The file goes away when the pane does. On a host where ev
 pane runs as one user this keeps panes from reaching each other by accident or
 through the API; it does not stop a program that reads another pane's file.
 
+### Extra views beside "View"
+
+A host can add its own buttons next to **view**, each showing something else in
+the same frame — an emulator, a second desktop, a dashboard. Off unless
+configured: with no file the UI is exactly as before.
+
+```bash
+HERDR_WEB_VIEWS=/path/to/views.json
+```
+
+```json
+[
+  { "id": "android", "label": "Android", "vnc": "127.0.0.1:5987" },
+  { "id": "docs", "label": "Docs", "icon": "📄", "url": "http://127.0.0.1:8080/" }
+]
+```
+
+or `{"views": [...], "reserve": [87]}`. Each entry has an `id` (lowercase letters,
+digits, dashes), a `label`, an optional `icon`, and exactly one of:
+
+- **`vnc`: `host:port`** of a plain VNC server. herdr-web serves its own noVNC
+  viewer and relays to that port, behind the same sign-in as the pane displays,
+  so nothing else (no websockify) is needed in front of it. It needs noVNC's
+  files on the host (`/usr/share/novnc`, or `NOVNC_ROOT`). Whoever opens the view
+  has input: there is no input lock on it. If the port does not answer, the
+  button says "not reachable".
+- **`url`**: a page loaded in the frame, under the `HERDR_WEB_IFRAMES` policy below
+  (off by default, so a url view needs at least `loopback`). A refused one shows
+  as a disabled button saying why.
+
+herdr-web only connects: it does not start, stop or own what is behind a view,
+so a view is the same for every pane and survives panes closing and the bridge
+restarting. Running the thing behind the port is up to whoever configured it.
+
+A display number a view uses is kept out of the pane browsers' slots (50–89): a
+`vnc` port on loopback 5900+N reserves N, and `reserve` lists any others. The
+file is read when the bridge starts; problems with it are logged as `[views]`.
+
 ### For agents: `tools/mcp-server.ts`
 
 The same thing as MCP tools, so a model reads the rules *before* it acts rather

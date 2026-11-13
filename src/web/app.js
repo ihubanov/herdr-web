@@ -275,14 +275,16 @@ async function refreshCapability(paneId, { firstLook = false } = {}) {
   // happened to advertise something: with nothing advertised it STARTS a shared
   // browser, which is how a user gets one without asking an agent to.
   el.framebtn.style.display = "inline-block";
+  $("viewbtns").classList.toggle("on", !!me?.views?.length);
   el.framebtn.title = c?.iframe
     ? `Embedded view: ${c.iframe.url}`
     : "Open a shared browser window on this pane";
 
   const now = c?.iframe?.url ?? null;
   if (!firstLook && now !== before) {
-    if (now && frameOpen) openFrame(now);         // the agent replaced what it shows
-    else if (!now && frameOpen) dismissFrame();   // …or withdrew it
+    // An extra view the user opened is not the agent's to replace or withdraw.
+    if (now && frameOpen && !frameView) openFrame(now);         // the agent replaced what it shows
+    else if (!now && frameOpen && !frameView) dismissFrame();   // …or withdrew it
     else if (now) el.tstatus.textContent = "a view is being offered — open it with the view button";
   }
 
@@ -383,6 +385,7 @@ function detach() {
   capability = null;
   el.chatbtn.style.display = "none";
   el.framebtn.style.display = "none";
+  $("viewbtns").classList.remove("on");
   if (termSock) { try { termSock.close(); } catch {} termSock = null; }
   selected = null; activeMode = "observe";
   el.ctl.classList.remove("on");
@@ -518,7 +521,7 @@ window.matchMedia(NARROW).addEventListener("change", (m) => {
 });
 el.fleetbtn.onclick = toggleView;
 el.framebtn.onclick = () => {
-  if (frameOpen) { dismissFrame(); return; }
+  if (frameOpen && !frameView) { dismissFrame(); return; }
   // An agent-advertised URL is the fast path. With nothing advertised the button
   // still works: it asks for a shared browser, which is the whole reason a user
   // wants this without an agent having thought of it first.
@@ -560,17 +563,58 @@ async function startSharedBrowser() {
   }
 }
 
+/**
+ * Extra views (HERDR_WEB_VIEWS): one button each beside "view", swapping the
+ * same frame to that view. A vnc view is a VNC server someone else runs,
+ * shown through our viewer; a url view is a plain page under the iframe
+ * policy. None configured means no buttons and nothing else changes.
+ */
+function renderViewButtons() {
+  const box = $("viewbtns");
+  box.innerHTML = "";
+  for (const v of me?.views ?? []) {
+    const b = document.createElement("button");
+    b.dataset.view = v.id;
+    b.textContent = v.icon ? `${v.icon} ${v.label}` : v.label;
+    if (v.kind === "url" && !v.url) { b.disabled = true; b.title = `${v.label}: ${v.rejected}`; }
+    else b.title = v.kind === "vnc" ? `Show ${v.label}` : `Show ${v.label}: ${v.url}`;
+    b.onclick = () => void openView(v, b);
+    box.appendChild(b);
+  }
+  box.classList.toggle("on", !!(me?.views?.length && el.framebtn.style.display !== "none"));
+}
+
+async function openView(v, b) {
+  if (frameOpen && frameView === v.id) { dismissFrame(); return; }
+  if (v.kind === "url") { openFrame(v.url, v); return; }
+  b.disabled = true;
+  try {
+    const r = await fetch(auth(`/api/views/status?id=${encodeURIComponent(v.id)}`));
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { el.tstatus.textContent = `${v.label}: ${d.error || r.statusText}`; return; }
+    if (!d.reachable) { el.tstatus.textContent = `${v.label}: not reachable`; return; }
+    openFrame(d.iframe_url, v);
+  } catch (e) {
+    el.tstatus.textContent = `${v.label}: ${e?.message ?? e}`;
+  } finally {
+    b.disabled = false;
+  }
+}
+
 /** Whether the floating window is up. Declared here, above every function that
  *  reads it: detach() runs during startup and would otherwise hit its TDZ. */
 let frameOpen = false;
+/** What the frame shows: its URL, and the extra view's id when it is one. */
+let frameUrl = null;
+let frameView = null;
 
 /**
  * Show an agent-advertised URL. The frame is sandboxed and must be a different
  * origin than this page — the bridge enforces that, since `allow-same-origin`
  * on a same-origin frame would let it drop its own sandbox and read our token.
  */
-function openFrame(url) {
-  const ours = url.startsWith("/shared/");
+function openFrame(url, view = null) {
+  const ours = url.startsWith("/shared/") || url.startsWith("/views/");
   // The sandbox depends on WHOSE page this is, which is the distinction the old
   // blanket attribute could not make.
   //
@@ -589,22 +633,31 @@ function openFrame(url) {
   el.frame.src = ours ? auth(url) : url;
   el.frameurl.textContent = url;
   const f = entry(selected);
-  el.framewho.textContent = f ? `from ${f.title}` : "";
-  // Only a display proxied through us can be shut down from here; an
-  // agent-advertised third-party page is not ours to stop.
-  el.framestop.style.display = ours ? "" : "none";
+  el.framewho.textContent = view ? view.label : f ? `from ${f.title}` : "";
+  // Only a pane display proxied through us can be shut down from here; an
+  // agent-advertised third-party page is not ours to stop, and neither is
+  // whatever runs behind an extra view.
+  el.framestop.style.display = ours && !view ? "" : "none";
   frameOpen = true;
+  frameUrl = url;
+  frameView = view ? view.id : null;
   restoreGeom();
   el.frameview.classList.add("on");
-  el.framebtn.classList.add("on");
-  startLockWatch(selected);
+  el.frameview.classList.toggle("freeview", !!view);
+  el.framebtn.classList.toggle("on", !view);
+  for (const b of document.querySelectorAll("#viewbtns button")) b.classList.toggle("on", b.dataset.view === frameView);
+  // An extra view has no input lock to watch.
+  if (view) stopLockWatch(); else startLockWatch(selected);
 }
 function closeFrame() {
   el.frame.src = "about:blank";
   el.frameurl.textContent = "";
   frameOpen = false;
-  el.frameview.classList.remove("on");
+  frameUrl = null;
+  frameView = null;
+  el.frameview.classList.remove("on", "freeview");
   el.framebtn.classList.remove("on");
+  for (const b of document.querySelectorAll("#viewbtns button")) b.classList.remove("on");
   stopLockWatch();
 }
 
@@ -962,8 +1015,10 @@ window.addEventListener("pagehide", () => {
   }
 });
 el.frameopen.onclick = () => {
-  const url = capability?.iframe?.url;
+  const url = frameUrl ?? capability?.iframe?.url;
   if (!url) return;
+  // An extra view needs no claim (it has no lock); it rides the session cookie.
+  if (url.startsWith("/views/")) { window.open(url, "_blank", "noopener,noreferrer"); dismissFrame(); return; }
   if (!url.startsWith("/shared/")) { window.open(url, "_blank", "noopener,noreferrer"); return; }
   // Popping out MOVES the display to its own tab: the embedded view closes, so
   // two viewers do not show one screen, and the tab takes input as the user —
@@ -1737,6 +1792,7 @@ async function loadMe() {
     // clicked the toggle themselves; an explicit choice is stored and wins thereafter.
     if (!EMBED.view && LS.get("preferChat", null) === null) preferChat = me.defaultView !== "terminal";
     el.me.textContent = me.multiuser ? me.label : "";
+    renderViewButtons();
     updateTitle();
     el.me.title = me.multiuser
       ? `signed in as ${me.label}${me.isAdmin ? " (admin)" : ""}`

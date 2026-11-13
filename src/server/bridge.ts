@@ -9,6 +9,7 @@
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, existsSync, unlinkSync } from "node:fs";
+import { connect as tcpConnect, type Socket as TcpSocket } from "node:net";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, dirname, extname, normalize } from "node:path";
@@ -20,7 +21,8 @@ import { say as enqueueSay, pending as pendingFor, onMessage, clearQueue, allPen
 import { detect as detectStream, detectFromPane as detectStreamFromPane, open as openStream, type StreamHandle } from "./agent-stream.ts";
 import { findTranscript, followTranscript, readBefore, TRANSCRIPT_ROOTS, type TranscriptHandle } from "./transcript.ts";
 import * as InputLock from "./input-lock.ts";
-import { slotStore, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
+import { slotStore, displayBusy, FIRST_SLOT, LAST_SLOT } from "./share-slots.ts";
+import { loadViews } from "./views.ts";
 import { paneTokens as makePaneTokens } from "./pane-tokens.ts";
 import { gcRepo, processCwds } from "./worktree-gc.ts";
 import { resumeCommand, SESSION_ID_RE } from "./resume.ts";
@@ -386,8 +388,16 @@ async function runningBrowser(paneId: string): Promise<{ n: number; url: string 
  */
 const CDP_MODE = (process.env.HERDR_WEB_CDP_MODE || "").trim().toLowerCase() === "exclusive" ? "exclusive" : "co-drive";
 
+/** Extra views beside "View" (see views.ts). Read once at start; none when unset. */
+const VIEWS = loadViews(process.env.HERDR_WEB_VIEWS);
+for (const e of VIEWS.errors) console.error(`[views] ${e}`);
+if (VIEWS.views.length) console.log(`[views] ${VIEWS.views.map((v) => v.id).join(", ")}`);
+/** Where noVNC's modules are, for the viewer a vnc view is shown in. */
+const NOVNC_ROOT = (process.env.NOVNC_ROOT || "/usr/share/novnc").replace(/\/$/, "");
+const SHIM_PAGE = new URL("../../tools/novnc-shim/index.html", import.meta.url).pathname;
+
 /** Each pane's shared-browser display, handed out rather than hashed (see share-slots.ts). */
-const shareSlots = slotStore();
+const shareSlots = slotStore(undefined, (n) => VIEWS.reserved.has(n) || displayBusy(n));
 /** The display the old hashed numbering gave a pane: only a hint for adopting one it started. */
 function legacySlot(paneId: string): number {
   return FIRST_SLOT + (Math.abs([...paneId].reduce((h, c) => h * 31 + c.charCodeAt(0), 7)) % 40);
@@ -789,7 +799,7 @@ const MIME: Record<string, string> = {
 };
 
 interface WsData {
-  kind: "events" | "terminal" | "stream" | "novnc";
+  kind: "events" | "terminal" | "stream" | "novnc" | "vnc";
   paneId?: string;
   /** This socket's seat in the pane's SHARED terminal session. */
   viewerId?: number;
@@ -812,6 +822,9 @@ interface WsData {
   wsTarget?: string;
   /** Frames that arrived before the upstream finished connecting. */
   pending?: Array<string | Uint8Array>;
+  /** A vnc view: the VNC server it relays to, and the connection to it. */
+  vnc?: { host: string; port: number };
+  tcp?: TcpSocket;
 }
 
 const PRINTABLE = /^[^\x00-\x1f\x7f]+$/;
@@ -1109,6 +1122,22 @@ const server = Bun.serve<WsData>({
         return;
       }
 
+      // A vnc view speaks plain RFB over TCP: noVNC's frames are relayed to it
+      // as bytes, so no websockify is needed in front of it.
+      if (d.kind === "vnc" && d.vnc) {
+        d.pending = [];
+        const tcp = tcpConnect(d.vnc.port, d.vnc.host);
+        d.tcp = tcp;
+        tcp.on("connect", () => {
+          for (const m of d.pending ?? []) { try { tcp.write(m); } catch {} }
+          d.pending = [];
+        });
+        tcp.on("data", (b) => { try { ws.send(new Uint8Array(b)); } catch {} });
+        tcp.on("close", () => { try { ws.close(); } catch {} });
+        tcp.on("error", () => { try { ws.close(1011, "view not reachable"); } catch {} });
+        return;
+      }
+
       if (d.kind === "novnc" && d.wsTarget) {
         if (d.paneId === BRAIN_ID) { brainViewers++; armBrainIdle(); }
         // RFB is binary and starts talking immediately, so anything the viewer
@@ -1140,6 +1169,13 @@ const server = Bun.serve<WsData>({
 
     async message(ws, raw) {
       const d = ws.data;
+
+      if (d.kind === "vnc") {
+        const payload = typeof raw === "string" ? Buffer.from(raw) : new Uint8Array(raw as any);
+        if (d.tcp && !d.tcp.connecting) { try { d.tcp.write(payload); } catch {} }
+        else d.pending?.push(payload);
+        return;
+      }
 
       if (d.kind === "novnc") {
         const payload = typeof raw === "string" ? raw : new Uint8Array(raw as any);
@@ -1253,6 +1289,7 @@ const server = Bun.serve<WsData>({
       ws.data.stream?.close();
       ws.data.tail?.close();
       if (ws.data.up) { try { ws.data.up.close(); } catch {} }
+      if (ws.data.tcp) { try { ws.data.tcp.destroy(); } catch {} }
       if (ws.data.kind === "novnc" && ws.data.paneId === BRAIN_ID) {
         brainViewers = Math.max(0, brainViewers - 1);
         armBrainIdle();
@@ -1271,6 +1308,25 @@ const server = Bun.serve<WsData>({
     },
   },
 });
+
+/**
+ * Who may load a framed display (a pane's shared display or an extra view).
+ * The iframe cannot set headers, and its subrequests carry no query token, so
+ * the entry request mints a path-scoped cookie the rest ride on. A
+ * cookie-signed-in viewer has no token to put in the iframe URL; the session
+ * cookie is Path=/ so every subrequest carries it too.
+ */
+function frameAuth(req: Request, url: URL, cookieName: string): { ok: boolean; qTok: string | null; viaQuery: boolean } {
+  const cookies = req.headers.get("cookie") ?? "";
+  const hasCookie = cookies.split(";").some((c) => {
+    const [k, v] = c.trim().split("=");
+    return k === cookieName && identity.resolve(decodeURIComponent(v ?? "")) !== null;
+  });
+  const qTok = url.searchParams.get("token");
+  const viaQuery = qTok !== null && identity.resolve(qTok) !== null;
+  const viaSession = identity.resolve(cookieToken(req)) !== null;
+  return { ok: hasCookie || viaQuery || viaSession, qTok, viaQuery };
+}
 
 function tokenOf(req: Request): string {
   return new URL(req.url).searchParams.get("token") || req.headers.get("x-herdr-token") || cookieToken(req) || "";
@@ -1373,26 +1429,55 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
     // Serves the pane's noVNC surface through THIS origin, so it rides whatever
     // tunnel the viewer already came in on. Without it the browser modal only
     // ever worked for a viewer on the same host as herdr-web.
+    // An extra view's VNC server, shown in herdr-web's own noVNC viewer. Same
+    // authentication as a pane display below; the page is our shim with
+    // input=free, its modules come from NOVNC_ROOT, and the socket is relayed
+    // to the configured host:port as plain TCP.
+    if (url.pathname.startsWith("/views/")) {
+      const rest = url.pathname.slice("/views/".length);
+      const cut = rest.indexOf("/");
+      const id = cut === -1 ? rest : rest.slice(0, cut);
+      const sub = cut === -1 ? "" : rest.slice(cut + 1);
+      const v = VIEWS.views.find((x) => x.id === id);
+      if (!v || v.kind !== "vnc") return new Response("no such view", { status: 404 });
+      const cookieName = `hw_view_${id.replace(/[^A-Za-z0-9]/g, "_")}`;
+      const { ok, qTok, viaQuery } = frameAuth(req, url, cookieName);
+      if (!ok) return new Response("unauthorized", { status: 401 });
+
+      if (sub === "websockify") {
+        if (srv.upgrade(req, { data: { kind: "vnc", vnc: { host: v.host, port: v.port }, authTok: tokenOf(req) } })) return undefined as any;
+        return new Response("upgrade failed", { status: 400 });
+      }
+      let file: string;
+      if (sub === "" || sub === "index.html") file = SHIM_PAGE;
+      else {
+        const safe = normalize(sub).replace(/^(\.\.[/\\])+/, "");
+        file = join(NOVNC_ROOT, safe);
+        if (!file.startsWith(NOVNC_ROOT + "/")) return new Response("not found", { status: 404 });
+      }
+      if (!existsSync(file)) {
+        return new Response(file === SHIM_PAGE || existsSync(NOVNC_ROOT) ? "not found"
+          : `noVNC is not installed at ${NOVNC_ROOT} (set NOVNC_ROOT)`, { status: file === SHIM_PAGE ? 500 : 404 });
+      }
+      const headers = new Headers({ "cache-control": "no-cache" });
+      headers.set("content-type", MIME[extname(file)] ?? "application/octet-stream");
+      if (file === SHIM_PAGE && viaQuery && qTok) {
+        headers.append("set-cookie",
+          `${cookieName}=${encodeURIComponent(qTok)}; Path=/views/${encodeURIComponent(id)}; ` +
+          `HttpOnly;${secureAttr(req)} SameSite=Lax; Max-Age=28800`);
+      }
+      return new Response(Bun.file(file), { headers });
+    }
+
     if (url.pathname.startsWith("/shared/")) {
       const rest = url.pathname.slice("/shared/".length);
       const cut = rest.indexOf("/");
       const paneId = decodeURIComponent(cut === -1 ? rest : rest.slice(0, cut));
       const sub = cut === -1 ? "" : rest.slice(cut + 1);
 
-      // The iframe cannot set headers, and its subrequests carry no query token,
-      // so the entry request mints a path-scoped cookie the rest ride on.
       const cookieName = `hw_shared_${paneId.replace(/[^A-Za-z0-9]/g, "_")}`;
-      const cookies = req.headers.get("cookie") ?? "";
-      const hasCookie = cookies.split(";").some((c) => {
-        const [k, v] = c.trim().split("=");
-        return k === cookieName && identity.resolve(decodeURIComponent(v ?? "")) !== null;
-      });
-      const qTok = url.searchParams.get("token");
-      const viaQuery = qTok !== null && identity.resolve(qTok) !== null;
-      // A cookie-signed-in viewer has no token to put in the iframe URL; the
-      // session cookie is Path=/ so every subrequest carries it too.
-      const viaSession = identity.resolve(cookieToken(req)) !== null;
-      if (!hasCookie && !viaQuery && !viaSession) return new Response("unauthorized", { status: 401 });
+      const { ok, qTok, viaQuery } = frameAuth(req, url, cookieName);
+      if (!ok) return new Response("unauthorized", { status: 401 });
 
       const target = await sharedTarget(paneId);
       if (!target) return new Response("this pane is not sharing a display", { status: 404 });
@@ -1443,6 +1528,22 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
 
       if (!authed(req) && !(PANE_SCOPED.has(url.pathname) && paneScope(req))) {
         return Response.json({ error: "unauthorized" }, { status: 401 });
+      }
+
+      // Does a vnc view's server answer? The frame says "not reachable" instead
+      // of an empty viewer when it does not.
+      if (url.pathname === "/api/views/status") {
+        const v = VIEWS.views.find((x) => x.id === url.searchParams.get("id"));
+        if (!v) return Response.json({ error: "no such view" }, { status: 404 });
+        if (v.kind !== "vnc") return Response.json({ id: v.id, reachable: true });
+        const reachable = await new Promise<boolean>((done) => {
+          const s = tcpConnect(v.port, v.host);
+          const end = (ok: boolean) => { s.destroy(); done(ok); };
+          s.setTimeout(1500, () => end(false));
+          s.on("connect", () => end(true));
+          s.on("error", () => end(false));
+        });
+        return Response.json({ id: v.id, reachable, iframe_url: `/views/${encodeURIComponent(v.id)}/?input=free` });
       }
 
       if (url.pathname === "/api/sessions") {
@@ -1567,6 +1668,14 @@ async function handleRequest(req: Request, srv: any): Promise<Response | undefin
           defaultLaunchCmd: DEFAULT_LAUNCH_CMD,
           lockLaunch: LOCK_LAUNCH,
           cdpMode: CDP_MODE,
+          // A url view refused by the iframe policy is still listed, with the
+          // reason, so its button can say why instead of vanishing.
+          views: VIEWS.views.map((v) => {
+            if (v.kind === "vnc") return { id: v.id, label: v.label, icon: v.icon, kind: "vnc" };
+            const ok = iframeUrlAllowed(v.url, IFRAME_POLICY, PORT);
+            return { id: v.id, label: v.label, icon: v.icon, kind: "url",
+                     url: ok.ok ? ok.url : null, rejected: ok.ok ? null : ok.reason };
+          }),
           agentName: AGENT_NAME,
           altUiUrl: ALT_UI_URL || null,
           altUiLabel: ALT_UI_LABEL,

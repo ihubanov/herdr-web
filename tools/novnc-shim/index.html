@@ -52,12 +52,15 @@ let rfb = null;
 // in, and this page talks to the lock API itself (see "standalone" below).
 const standalone = window.parent === window;
 const sharedPane = location.pathname.match(/^\/shared\/([^/]+)\//);
-const lockUrl = sharedPane ? `/api/input-lock?pane_id=${sharedPane[1]}` : null;
+// input=free: a display with no input lock (an extra view behind a VNC port
+// someone else runs). The viewer just has input, as with the brain display.
+const freeInput = qs.get('input') === 'free';
+const lockUrl = sharedPane && !freeInput ? `/api/input-lock?pane_id=${sharedPane[1]}` : null;
 let giveBack = null;
 // Start LOCKED. If the parent never speaks — an old herdr-web, a direct visit —
 // the safe default is a display you can watch but not disturb, because the
 // agent may well be mid-action on it.
-let iHaveInput = false;
+let iHaveInput = freeInput;
 
 function paint() {
   if (rfb) rfb.viewOnly = !iHaveInput;
@@ -66,7 +69,7 @@ function paint() {
 }
 
 function setLock(state) {
-  const mine = state && state.owner === 'user';
+  const mine = freeInput || (state && state.owner === 'user');
   iHaveInput = !!mine;
   if (!mine) {
     const who = state && state.owner === 'agent'
