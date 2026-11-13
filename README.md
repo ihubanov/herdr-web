@@ -395,7 +395,8 @@ digits, dashes), a `label`, an optional `icon`, and exactly one of:
   so nothing else (no websockify) is needed in front of it. It needs noVNC's
   files on the host (`/usr/share/novnc`, or `NOVNC_ROOT`). Whoever opens the view
   has input: there is no input lock on it. If the port does not answer, the
-  button says "not reachable".
+  button says "not reachable". `GET /api/views/status?id=<id>` probes one view;
+  without `id` it lists every view with `reachable`.
 - **`url`**: a page loaded in the frame, under the `HERDR_WEB_IFRAMES` policy below
   (off by default, so a url view needs at least `loopback`). A refused one shows
   as a disabled button saying why.
