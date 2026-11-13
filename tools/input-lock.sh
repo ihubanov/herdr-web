@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # input-lock.sh — an agent's side of input arbitration on a shared display.
 #
-# Claim it before driving, renew while you work, release when you stop. The
-# claim is not advisory: the CDP gate refuses to forward until you hold it, so
-# an agent that skips this simply cannot reach the browser.
+# Claim it before driving, renew while you work, release when you stop. In
+# co-drive mode (the default) the claim tells the user you are driving and
+# blocks no one. In exclusive mode (HERDR_WEB_CDP_MODE=exclusive) the CDP gate
+# refuses to forward until you hold it, so an agent that skips this cannot
+# reach the browser.
 #
 #   tools/input-lock.sh status  [--pane ID]
 #   tools/input-lock.sh claim   [--pane ID] [--ttl 30000] [--label "what you are doing"]

@@ -100,7 +100,7 @@ if d.get('iframe_rejected'): print('REFUSED:', d['iframe_rejected'], file=sys.st
 print('drive it: CDP through the gate on 127.0.0.1:%s' % d.get('cdp_gate_port'))
 print('          (or DISPLAY=:%s for X tools)' % d.get('display'))
 "
-    echo "the gate refuses until you hold input:"
+    echo "claim input while you drive (in exclusive mode the gate refuses until you do):"
     echo "  $HERE/input-lock.sh claim --pane $PANE --label 'what you are doing'"
     echo "  $HERE/input-lock.sh release --pane $PANE"
     ;;
