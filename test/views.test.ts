@@ -12,7 +12,7 @@ describe("parseViews", () => {
     ]);
     expect(c.errors).toEqual([]);
     expect(c.views).toEqual([
-      { id: "android", label: "Android", icon: undefined, kind: "vnc", host: "127.0.0.1", port: 5987 },
+      { id: "android", label: "Android", icon: undefined, kind: "vnc", host: "127.0.0.1", port: 5987, resize: "scale" },
       { id: "docs", label: "docs", icon: undefined, kind: "url", url: "http://127.0.0.1:8080/" },
     ]);
   });
@@ -20,6 +20,15 @@ describe("parseViews", () => {
   test("a loopback VNC port reserves its display; reserve adds more", () => {
     const c = parseViews({ views: [{ id: "a", vnc: "localhost:5987" }, { id: "b", vnc: "10.0.0.5:5990" }], reserve: [70] });
     expect([...c.reserved].sort()).toEqual([70, 87]);
+  });
+
+  test("resize defaults to scale; a bad one is reported and falls back", () => {
+    const c = parseViews([
+      { id: "r", vnc: "127.0.0.1:5901", resize: "remote" },
+      { id: "x", vnc: "127.0.0.1:5902", resize: "stretch" },
+    ]);
+    expect(c.views.map((v) => (v as any).resize)).toEqual(["remote", "scale"]);
+    expect(c.errors.length).toBe(1);
   });
 
   test("IPv6 host:port", () => {

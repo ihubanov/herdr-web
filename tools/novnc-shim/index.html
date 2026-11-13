@@ -102,11 +102,26 @@ try {
     errEl.textContent = `disconnected${e.detail && e.detail.clean ? '' : ' unexpectedly'}`;
     errEl.classList.add('on');
   });
-  rfb.addEventListener('connect', () => { errEl.classList.remove('on'); paint(); });
+  rfb.addEventListener('connect', () => { errEl.classList.remove('on'); paint(); postFbSize(); });
 } catch (e) {
   errEl.textContent = `could not start the VNC client: ${e && e.message ? e.message : e}`;
   errEl.classList.add('on');
 }
+
+/* Tell the parent the remote screen's size, on connect and whenever it changes,
+ * so it can shape the window to it (a phone is tall and narrow, not 16:10).
+ * noVNC raises no event for a framebuffer resize, so it is checked each second. */
+let lastFb = '';
+function postFbSize() {
+  if (!rfb || standalone) return;
+  const c = screenEl.querySelector('canvas');
+  const w = rfb._fbWidth || (c && c.width) || 0;
+  const h = rfb._fbHeight || (c && c.height) || 0;
+  if (!w || !h || `${w}x${h}` === lastFb) return;
+  lastFb = `${w}x${h}`;
+  try { window.parent.postMessage({ kind: 'herdr-fb-size', width: w, height: h }, '*'); } catch { /* no parent */ }
+}
+setInterval(postFbSize, 1000);
 
 /* ---------------------------------------------------------------- clipboard
  * Clipboard is INPUT, so it follows the same lock as the keyboard: a viewer
