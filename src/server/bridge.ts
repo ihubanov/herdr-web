@@ -1132,7 +1132,7 @@ const server = Bun.serve<WsData>({
           for (const m of d.pending ?? []) { try { tcp.write(m); } catch {} }
           d.pending = [];
         });
-        tcp.on("data", (b) => { try { ws.send(new Uint8Array(b)); } catch {} });
+        tcp.on("data", (b: Buffer) => { try { ws.send(new Uint8Array(b)); } catch {} });
         tcp.on("close", () => { try { ws.close(); } catch {} });
         tcp.on("error", () => { try { ws.close(1011, "view not reachable"); } catch {} });
         return;
